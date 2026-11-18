@@ -92,8 +92,7 @@ export function startQueueServer(opts: QueueServerOptions) {
 }
 
 function parsePort(raw: string | undefined): number {
-  const fallback: string = DEFAULT_QUEUE_PORT;
-  return raw ? Number(raw) : Number(fallback);
+  return raw ? Number(raw) : DEFAULT_QUEUE_PORT;
 }
 
 if (import.meta.main) {
