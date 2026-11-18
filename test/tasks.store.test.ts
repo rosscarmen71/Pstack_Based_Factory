@@ -33,7 +33,7 @@ test("setStatus preserves tasks appended after the store last loaded", () => {
   writeFileSync(path, JSON.stringify([t("a")]));
   const store = fileStore(path);
   store.load();
-  writeFileSync(path, JSON.stringify([t("a"), t("b")])); // plan skill appends
+  writeFileSync(path, JSON.stringify([t("a"), t("b")])); // take_order skill appends
   store.setStatus("a", "pr");
   expect((JSON.parse(readFileSync(path, "utf8")) as Task[]).map((x) => x.id)).toEqual(["a", "b"]);
 });

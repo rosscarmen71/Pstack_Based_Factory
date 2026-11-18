@@ -1,4 +1,4 @@
-// The task shape written by the plan skill and advanced by the loop.
+// The task shape written by the take_order skill and advanced by the loop.
 
 export const TASK_STATUSES = ["pending", "in_progress", "pr"] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -11,7 +11,7 @@ export interface Task {
   dependencies: string[];
   /** Owned by the loop: pending -> in_progress -> pr (terminal). */
   status: TaskStatus;
-  /** Optional ISO 8601 timestamp, stamped by the plan skill when the task is appended. */
+  /** Optional ISO 8601 timestamp, stamped by the take_order skill when the task is appended. */
   createdAt?: string;
   /** Agent runs on this task. */
   runs?: number;

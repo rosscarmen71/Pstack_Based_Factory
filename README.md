@@ -9,8 +9,12 @@ This repo contains a smple software factory wich heavaly utalizes [pstack skills
 ## PR routing
 
 Each iteration the loop lists open PRs and picks the single oldest candidate across ready tasks and PRs (by
-`createdAt`; tasks without one go last). A task runs `AGENT_CMD` (`{id}`); a PR that needs work runs `REVIEW_CMD` or
-`PATCH_CMD` (`{pr}` is the PR number). PRs on a task's own `<type>/<task-id>` branch are left to that task.
+`createdAt`; tasks without one go last). A task runs `AGENT_CMD` (`/cook {id}`); a PR that needs work runs
+`REVIEW_CMD` (`/taste_test {pr}`) or `PATCH_CMD` (`/remake {pr}`), where `{pr}` is the PR number. Tasks are added by
+hand with the `take_order` skill. PRs on a task's own `<type>/<task-id>` branch are left to that task.
+
+The audit log, queue view and history keep the action labels `dev-task`, `review` and `patch`. These name what the loop
+did, not which skill ran.
 
 - A failing task returns to `pending` and stops the loop. A failing review or patch is logged and the loop continues.
 - Every review or patch run counts as an attempt, pass or fail. After `MAX_PR_ATTEMPTS` (3) the PR is stuck: the loop
@@ -63,5 +67,5 @@ an `error` field with empty rows and a 200.
 
 ## Lessons
 
-Lesson 1 builds the `plan` and `dev-task` skills (`skills/`) and the loop (`loop.ts`). A finished copy is tagged
-`factory-lesson-1-reference`.
+Lesson 1 builds the `take_order` and `cook` skills (`skills/`, adapted from app-vitals' `plan` and `dev-task`) and the
+loop (`loop.ts`). A finished copy is tagged `factory-lesson-1-reference`.

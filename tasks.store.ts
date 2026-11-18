@@ -1,4 +1,4 @@
-// File-backed task store. Re-reads before every write so tasks appended by the plan skill are never clobbered.
+// File-backed task store. Re-reads before every write so tasks appended by the take_order skill are never clobbered.
 
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { parseTasks, type Task, type TaskStatus } from "./tasks.schema.ts";

@@ -782,7 +782,7 @@ describe("ALLOWED_TOOLS", () => {
     for (const t of expected) expect(ALLOWED_TOOLS).toContain(t);
   });
 
-  test("includes Agent so dev-task can launch the independent verifier subagent", () => {
+  test("includes Agent so cook can launch the independent verifier subagent", () => {
     expect(ALLOWED_TOOLS).toContain("Agent");
   });
 

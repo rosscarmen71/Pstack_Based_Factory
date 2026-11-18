@@ -1,4 +1,4 @@
-// The factory loop: pick one ready task, hand it to Claude Code running the dev-task skill, repeat.
+// The factory loop: pick one ready task, hand it to Claude Code running the cook skill, repeat.
 // The loop owns status: pending -> in_progress -> pr. `pr` is terminal.
 
 import { AGENT_RESULT_SCHEMA, parseAgentResult, toAuditOutcome, type AgentResult } from "./agent-result.ts";
@@ -9,7 +9,7 @@ import { ghPrSource, type PrSource, type PullRequest } from "./prs.ts";
 import type { Task } from "./tasks.schema.ts";
 import { fileStore, type TaskStore } from "./tasks.store.ts";
 
-/** Claude Code headless, running the dev-task skill for one task. `{id}` is substituted. */
+/** Claude Code headless, running the cook skill for one task. `{id}` is substituted. */
 export const ALLOWED_TOOLS: string[] = [
   "Read",
   "Edit",
@@ -33,11 +33,11 @@ export const ALLOWED_TOOLS: string[] = [
 /** Flags that make the agent end with a schema-checked result report in a JSON envelope on stdout. */
 const REPORT_FLAGS: string[] = ["--output-format", "json", "--json-schema", JSON.stringify(AGENT_RESULT_SCHEMA)];
 
-export const AGENT_CMD: string[] = ["claude", "-p", "/dev-task {id}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
+export const AGENT_CMD: string[] = ["claude", "-p", "/cook {id}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
 
 /** Claude Code headless, reviewing or patching one open PR. `{pr}` is substituted with the PR number. */
-export const REVIEW_CMD: string[] = ["claude", "-p", "/review {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
-export const PATCH_CMD: string[] = ["claude", "-p", "/patch {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
+export const REVIEW_CMD: string[] = ["claude", "-p", "/taste_test {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
+export const PATCH_CMD: string[] = ["claude", "-p", "/remake {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
 
 /** First pending task whose dependencies have all reached `pr`, else null. */
 export function pickNext(tasks: Task[]): Task | null {
