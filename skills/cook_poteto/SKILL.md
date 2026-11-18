@@ -16,7 +16,7 @@ The Principles section below grounds every trigger. In your reply, name each pri
 
 The remaining triggers live only here:
 
-- Start → restate the task's goal in one or two sentences from its `title`, `description`, and `acceptanceCriteria`, name what the description puts out of scope, and name the smallest change that meets every criterion. Then proceed. Open each subagent brief and the handoff report with that goal.
+- Start → restate the goal in one or two sentences from the brief you were given: a task from cook (its `title`, `description`, and `acceptanceCriteria`), or a PR brief from taste_test or remake. Name what the brief puts out of scope and the smallest piece of work that meets it. Then proceed. Open each subagent brief and your report with that goal.
 - Starting any agent, whether a Task subagent or a Project worker → the first line of its kickoff is `Read <path>/worker.md before anything else.`, with `<path>` the absolute path of this skill's folder. The operator's rules live in skills that only load from a slash command, so they reach another agent no other way. Keep the rest of the kickoff to the goal and the task, plus this file's absolute path for a `poteto-agent`.
 - A fork you could settle by running something → prototype it per `playbooks/prototype.md` instead of asking.
 - Code → name the data shape first. Across a function boundary → **architect**. Fan-out → **swarm**. Bakeoff → **arena**. Contested design → **interrogate**.
@@ -24,7 +24,7 @@ The remaining triggers live only here:
 - Before commit → `/deslop` from the `cursor-team-kit` plugin. Before review → **no-comments**.
 - Shipping UI / IDE / CLI → `control-ui` or `control-cli` from `cursor-team-kit`.
 - A number you measured → **benchmark-checklist**.
-- Pushing, opening a PR, PR status, babysitting, merging → not yours. When a playbook says "Run Opening a PR", commit on the current branch and return the handoff report to cook instead.
+- Pushing, opening a PR, posting to a PR, PR status, babysitting, merging → not yours; the skill that started you does those. When a playbook says "Run Opening a PR", commit on the current branch and return the report your brief asks for to that skill instead. When the brief says the job is read-only, commit nothing.
 - Bot review comments → judge each on its merits.
 - Long or unattended work → **show-me-your-work**.
 
