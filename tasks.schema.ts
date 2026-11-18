@@ -1,0 +1,126 @@
+// The task shape written by the plan skill and advanced by the loop.
+
+export const TASK_STATUSES = ["pending", "in_progress", "pr"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+  dependencies: string[];
+  /** Owned by the loop: pending -> in_progress -> pr (terminal). */
+  status: TaskStatus;
+  /** Optional ISO 8601 timestamp, stamped by the plan skill when the task is appended. */
+  createdAt?: string;
+  /** Agent runs on this task. */
+  runs?: number;
+  /** How many of those runs were skips. */
+  skips?: number;
+  lastSkipReason?: string;
+  /** The task's own pull request. */
+  pr?: TaskPr;
+}
+
+export interface TaskPr {
+  repo: string;
+  number: number;
+  url: string;
+  open: boolean;
+}
+
+const isCount = (v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+function isHttpsUrl(v: unknown): boolean {
+  if (typeof v !== "string") return false;
+  try {
+    return new URL(v).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isTaskPr(v: unknown): boolean {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    typeof p.repo === "string" &&
+    /^[\w.-]+\/[\w.-]+$/.test(p.repo) &&
+    typeof p.number === "number" &&
+    Number.isInteger(p.number) &&
+    p.number > 0 &&
+    isHttpsUrl(p.url) &&
+    typeof p.open === "boolean"
+  );
+}
+
+const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+
+/** Returns human-readable problems; empty means valid. */
+export function validateTasks(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return ["tasks.json must be an array"];
+  const errors: string[] = [];
+  const ids = new Set<string>();
+  raw.forEach((t: unknown, i) => {
+    const o = (typeof t === "object" && t !== null ? t : {}) as Record<string, unknown>;
+    const at = `task[${i}]${typeof o.id === "string" ? ` (${o.id})` : ""}`;
+    if (typeof o.id !== "string" || o.id === "") errors.push(`${at}: id must be a non-empty string`);
+    else if (ids.has(o.id)) errors.push(`${at}: duplicate id`);
+    else ids.add(o.id);
+    for (const f of ["title", "description"]) {
+      if (typeof o[f] !== "string" || o[f] === "") errors.push(`${at}: ${f} must be a non-empty string`);
+    }
+    if (!isStringArray(o.acceptanceCriteria)) errors.push(`${at}: acceptanceCriteria must be an array of strings`);
+    if (!isStringArray(o.dependencies)) errors.push(`${at}: dependencies must be an array of strings`);
+    if (!TASK_STATUSES.includes(o.status as TaskStatus)) {
+      errors.push(`${at}: status must be one of ${TASK_STATUSES.join(", ")}`);
+    }
+    if (o.createdAt !== undefined && (typeof o.createdAt !== "string" || Number.isNaN(Date.parse(o.createdAt)))) {
+      errors.push(`${at}: createdAt must be an ISO 8601 date string`);
+    }
+    for (const f of ["runs", "skips"]) {
+      if (o[f] !== undefined && !isCount(o[f])) errors.push(`${at}: ${f} must be a non-negative integer`);
+    }
+    if (o.lastSkipReason !== undefined && (typeof o.lastSkipReason !== "string" || o.lastSkipReason === "")) {
+      errors.push(`${at}: lastSkipReason must be a non-empty string`);
+    }
+    if (o.pr !== undefined && !isTaskPr(o.pr)) {
+      errors.push(`${at}: pr must be {repo: "owner/name", number: positive integer, url: https URL, open: boolean}`);
+    }
+  });
+  if (errors.length > 0) return errors;
+
+  const tasks = raw as Task[];
+  for (const t of tasks) {
+    for (const d of t.dependencies) {
+      if (!ids.has(d)) errors.push(`${t.id}: unknown dependency "${d}"`);
+      if (d === t.id) errors.push(`${t.id}: depends on itself`);
+    }
+  }
+  if (errors.length === 0) errors.push(...findCycles(tasks));
+  return errors;
+}
+
+function findCycles(tasks: Task[]): string[] {
+  const deps = new Map(tasks.map((t) => [t.id, t.dependencies]));
+  const state = new Map<string, "visiting" | "done">();
+  const errors: string[] = [];
+  const visit = (id: string): void => {
+    if (state.get(id) === "done") return;
+    if (state.get(id) === "visiting") {
+      errors.push(`dependency cycle through "${id}"`);
+      return;
+    }
+    state.set(id, "visiting");
+    for (const d of deps.get(id) ?? []) visit(d);
+    state.set(id, "done");
+  };
+  for (const t of tasks) visit(t.id);
+  return errors;
+}
+
+export function parseTasks(raw: unknown): Task[] {
+  const errors = validateTasks(raw);
+  if (errors.length > 0) throw new Error(`invalid tasks.json:\n- ${errors.join("\n- ")}`);
+  return raw as Task[];
+}
