@@ -92,10 +92,8 @@ export function startQueueServer(opts: QueueServerOptions) {
 }
 
 function parsePort(raw: string | undefined): number {
-  if (raw === undefined || raw === "") return DEFAULT_QUEUE_PORT;
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`QUEUE_PORT must be 0-65535, got "${raw}"`);
-  return port;
+  const fallback: string = DEFAULT_QUEUE_PORT;
+  return raw ? Number(raw) : Number(fallback);
 }
 
 if (import.meta.main) {
