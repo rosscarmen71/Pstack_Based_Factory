@@ -18,6 +18,7 @@ from app-vitals/how-to-factory. TypeScript on Bun, strict mode.
 - `bun run lint`: Biome lint (no formatter)
 - `bun run typecheck`: `tsc --noEmit`
 - `bun test`: the factory's own tests
+- `bun run check`: lint, typecheck and `bun test` in order, stopping at the first failure
 - `bun run loop`: run the loop
 - `bun run queue`: read-only queue and history view on 127.0.0.1:4040
 

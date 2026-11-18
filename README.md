@@ -78,6 +78,7 @@ bun install
 | `bun run lint` | Biome lint (no formatter) |
 | `bun run typecheck` | `tsc --noEmit` |
 | `bun test` | The factory's own tests |
+| `bun run check` | Lint, typecheck and `bun test` in order, stopping at the first failure |
 
 `factory/tasks.json` must exist before the loop or the queue view starts. `take_order` creates it, or you can start
 from `[]`.
