@@ -1,0 +1,17 @@
+{
+  "name": "pstack-based-factory",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "loop": "bun factory/loop.ts",
+    "queue": "bun factory/queue-server.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/bun": "1.4.4",
+    "typescript": "^7.0.0"
+  }
+}

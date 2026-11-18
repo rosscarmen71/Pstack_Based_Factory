@@ -13,7 +13,10 @@ export interface AgentResult {
   reason?: string;
 }
 
-/** JSON Schema handed to the agent CLI. `reason` is required when skipped. */
+/**
+ * JSON Schema handed to the agent CLI. The API rejects `oneOf`/`allOf`/`anyOf` at the top level of a tool schema,
+ * so "reason is required when skipped" is enforced by `validateReport`, not here.
+ */
 export const AGENT_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -21,7 +24,6 @@ export const AGENT_RESULT_SCHEMA = {
     reason: { type: "string", minLength: 1 },
   },
   required: ["outcome"],
-  anyOf: [{ properties: { outcome: { const: "processed" } } }, { properties: { outcome: { const: "skipped" } }, required: ["reason"] }],
   additionalProperties: false,
 } as const;
 

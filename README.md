@@ -1,71 +1,179 @@
 # Pstack Based Factory
 
-This repo contains a smple software factory wich heavaly utalizes [pstack skills](https://github.com/cursor/plugins/tree/main/pstack).
+A small software factory that relies heavily on [pstack skills](https://github.com/cursor/plugins/tree/main/pstack).
+A loop picks up tasks, has Claude Code turn each one into a pull request, and reviews or fixes other open PRs.
 
->Note: also utalizes some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main) such as `grilling`, `grill-me`, `grill-with-docs`, and `domain-modeling`.
+> Also uses some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main), such as `grilling`,
+> `grill_me`, `grill-with-docs` and `domain-modeling`.
 
->Note: the factory layout and files are adapted from [app-vitals how-to-factory repo](https://github.com/app-vitals/how-to-factory/tree/main).
+> The factory layout and loop code are adapted from the
+> [app-vitals how-to-factory repo](https://github.com/app-vitals/how-to-factory/tree/main).
 
-## PR routing
+## How it works
 
-Each iteration the loop lists open PRs and picks the single oldest candidate across ready tasks and PRs (by
-`createdAt`; tasks without one go last). A task runs `AGENT_CMD` (`/cook {id}`); a PR that needs work runs
-`REVIEW_CMD` (`/taste_test {pr}`) or `PATCH_CMD` (`/remake {pr}`), where `{pr}` is the PR number. Tasks are added by
-hand with the `take_order` skill. PRs on a task's own `<type>/<task-id>` branch are left to that task.
+1. **You add tasks.** Run `/take_order` in Claude Code with a short description of what you want built. It designs
+   the feature with you (`grill-with-docs`), splits it into tasks (`to_tasks`), and appends them to
+   `factory/tasks.json` once you approve.
+2. **The loop picks the next thing to do.** `bun run loop` starts `factory/loop.ts`. Each turn it reads the tasks,
+   lists open PRs with `gh`, and picks the single oldest candidate.
+3. **A task becomes a PR.** The loop runs `claude -p "/cook <task-id>"`. `cook` creates the branch, has
+   `cook_poteto` implement the task, runs the checks, gets an independent verification, and opens the PR.
+4. **Other PRs get reviewed or fixed.** For an open PR that isn't one of the factory's own task PRs, the loop runs
+   `claude -p "/taste_test <pr>"` to review it, or `claude -p "/remake <pr>"` to fix conflicts, failing CI or
+   requested changes.
+5. **You watch.** `bun run queue` serves a read-only page with what's running, what's next and what already ran.
 
-The audit log, queue view and history keep the action labels `dev-task`, `review` and `patch`. These name what the loop
-did, not which skill ran.
+Merging is always up to you. The loop never merges.
 
-- A failing task returns to `pending` and stops the loop. A failing review or patch is logged and the loop continues.
-- Every review or patch run counts as an attempt, pass or fail. After `MAX_PR_ATTEMPTS` (3) the PR is stuck: the loop
-  labels it `needs-human`, comments once, and never runs it again. Removing the label resets the count.
-- If listing PRs fails, the loop logs it and carries on with tasks only.
-- The loop sleeps `LOOP_IDLE_MS` only when there is nothing to do. Attempt counts live in `pr-attempts.json` (gitignored).
-- Merging is not part of the loop.
+## Layout
 
-## Stdout reporting contract
+```
+.claude/skills -> ../factory/skills   symlink; how Claude Code finds the skills
+factory/
+  loop.ts            the loop: picks work, runs the agent, tracks status
+  candidates.ts      ranks ready tasks and PRs that need work, oldest first
+  pr-state.ts        decides whether a PR needs review, patch or nothing
+  prs.ts             lists open PRs through `gh pr list`
+  pr-attempts.ts     counts review/patch attempts per PR, flags stuck PRs
+  agent-result.ts    the result report schema and its parser
+  audit-log.ts       append-only log of every agent run
+  tasks.schema.ts    the task shape and its validation
+  tasks.store.ts     reads and writes factory/tasks.json
+  queue-server.ts    the read-only queue and history web view
+  queue-view.ts, history-view.ts, pr-link.ts   HTML rendering for the view
+  *.test.ts          tests, next to the file they test
+  skills.test.ts     checks that cook, taste_test and remake keep the result contract
+  skills/            every skill (see below)
+  tasks.json         the task queue
+  audit-log.jsonl    run history (gitignored, created on first run)
+  pr-attempts.json   attempt counts (gitignored, created on first run)
+```
 
-`AGENT_CMD`, `REVIEW_CMD` and `PATCH_CMD` run Claude Code with `--output-format json` and `--json-schema` (the
-`AGENT_RESULT_SCHEMA` from `agent-result.ts`). The runner captures stdout (stderr stays inherited), parses the JSON
-envelope and prints its `result` text so the run stays visible. A run resolves to `{ exitCode, report }`, where `report`
-is `{ outcome: "processed" }` or `{ outcome: "skipped", reason }`, or `null` when stdout holds no valid report.
+### Skills
 
-- Exit 0 still means success, except a `skipped` report. A skipped task returns to `pending` and stops the loop like a
-  failure, with a `skip` audit entry carrying the agent's reason.
-- A skipped review or patch counts as an attempt and its head SHA is marked handled, so it is not retried until new
-  commits. It does not stop the loop.
-- Exit 0 with no valid report is audited as `failure` (`agent returned no result report`), but loop control still trusts
+- **Run by the loop:** `cook` (task → PR), `taste_test` (review a PR), `remake` (fix a PR).
+- **Run by you:** `take_order` (add tasks).
+- **Used inside those:** `cook_poteto` does the actual coding, review and fixing. `to_tasks`, `grill-with-docs`,
+  `interrogate` and the `principle-*` skills are read along the way. The rest of `factory/skills/` are general pstack
+  and Matt Pocock skills you can also run yourself.
+
+## Prerequisites
+
+- [Bun](https://bun.sh)
+- [GitHub CLI](https://cli.github.com), signed in with `gh auth login`. The loop lists, labels and comments on PRs.
+- The Claude Code CLI (`npm install -g @anthropic-ai/claude-code`), on the `PATH` of the shell that runs the loop.
+
+Then install dependencies:
+
+```bash
+bun install
+```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `bun run loop` | Start the factory loop (`factory/loop.ts`). Stop it with Ctrl+C. |
+| `bun run queue` | Read-only queue and history view on http://127.0.0.1:4040 |
+| `bun run lint` | Biome lint (no formatter) |
+| `bun run typecheck` | `tsc --noEmit` |
+| `bun test` | The factory's own tests |
+
+`factory/tasks.json` must exist before the loop or the queue view starts. `take_order` creates it, or you can start
+from `[]`.
+
+## Tasks
+
+Each task in `factory/tasks.json` has an `id`, `title`, `description`, `acceptanceCriteria`, `dependencies` (other
+task ids) and a `status`. `take_order` also stamps `createdAt`. The loop owns `status` and moves it
+`pending` → `in_progress` → `pr`, where `pr` means the task's PR is open and is final. The loop also records `runs`,
+`skips`, `lastSkipReason` and the task's `pr` (repo, number, url, open).
+
+A task is ready when it is `pending` and every dependency has reached `pr`. The PR doesn't have to be merged.
+`cook` branches from its dependencies' branches when it has any.
+
+Tests are not mandatory for the features the factory builds. `cook` proves each acceptance criterion with one of
+three proof types: a `test`, a `live` check or a `manual` check. The factory's own code is tested, and those tests run
+in CI.
+
+## The loop
+
+Each turn, the loop takes the single oldest candidate across ready tasks and PRs that need work, by `createdAt`.
+Tasks without `createdAt` go last.
+
+**Tasks.** The loop sets the task to `in_progress` and runs `/cook <id>`.
+
+- A `processed` result moves the task to `pr`.
+- A failure (non-zero exit) or a `skipped` result returns the task to `pending` and **stops the loop**. A skip
+  records its reason on the task.
+
+**PRs.** `pr-state.ts` decides what each open PR needs. The first matching rule wins:
+
+1. Draft, or labelled `needs-human` → nothing
+2. CI failing, merge conflict, or changes requested → **patch** (`/remake`)
+3. Approved with CI passing → nothing
+4. New commits since the last review → **review** (`/taste_test`)
+5. Anything else → nothing
+
+- PRs on a task's own branch (`<type>/<task-id>`) belong to that task. The loop doesn't review or patch them.
+- Every review or patch run counts as an attempt, whether it passes or fails. After `MAX_PR_ATTEMPTS` (3), the loop
+  labels the PR `needs-human`, comments once, and stops working on it. Removing the label resets the count.
+- A failed or skipped review or patch is logged, and the loop carries on. A review that exits 0 (processed or
+  skipped) marks that head commit as reviewed, so it isn't reviewed again until new commits arrive. A review that
+  fails leaves the commit unreviewed, so it's retried. Patches don't mark commits.
+- A PR's attempt count is dropped once the PR is no longer open.
+- If listing PRs fails, the loop logs it and continues with tasks only.
+
+When there's nothing to do, the loop sleeps `LOOP_IDLE_MS` (60 s) and checks again.
+
+### Agent permissions
+
+Each run gets `--allowedTools` from `ALLOWED_TOOLS` in `factory/loop.ts`: `Read`, `Edit`, `Write`, `Glob`, `Grep`,
+`Agent` (for the independent verifier subagent), and Bash limited to `git`, `gh`, `bun`, `jq`, `ls`, `cat`, `head`,
+`tail`, `wc`, `sed -n` and `echo`.
+
+### Result report
+
+Every run uses `--output-format json --json-schema <AGENT_RESULT_SCHEMA>` (`factory/agent-result.ts`). The agent ends
+with `{ "outcome": "processed" }` or `{ "outcome": "skipped", "reason": "…" }`. The loop parses that from stdout and
+prints the agent's result text, so you can follow the run.
+
+- A non-zero exit is a failure, whatever the report says.
+- Exit 0 with a `skipped` report is a skip. A skip without a reason doesn't count as a valid report.
+- Exit 0 with no valid report is logged as a failure (`agent returned no result report`), but the loop still trusts
   the exit code.
-- Audit entries are built from the exit code and report by `toAuditOutcome`.
-
+- The schema has no top-level `anyOf`/`oneOf`/`allOf`, because the Claude API rejects those in a tool schema. The
+  "reason when skipped" rule is enforced in code instead.
 
 ## Audit log
 
-Every run the loop makes is appended as one JSON line to `factory/audit-log.jsonl` (gitignored): a `dev-task`, `review`
-or `patch` entry with the target, outcome (`success`, `failure` or `skip`), exit code and duration. `failure` and `skip`
-entries carry a `reason` (a non-zero exit records `exited with code N`). The log holds only what the agent did when it
-ran: a runner that throws, attempt limits, flag failures and idle polls are logged to the console, not recorded. A
-failing task is recorded before the loop stops, and a failed audit write is logged without stopping the loop. Without
-an `audit` option the loop records nothing.
+Every agent run is appended as one JSON line to `factory/audit-log.jsonl`. Each line holds the action, target
+(task id or PR number), title, outcome (`success`, `failure` or `skip`), exit code and duration. PR runs also record
+the repo and URL. `failure` and `skip` entries carry a `reason`. The action labels are `dev-task`, `review` and
+`patch`; they name what the loop did, not which skill ran.
+
+The log only records agent runs. Runners that crash, attempt limits, flagging failures and idle polls go to the
+console only. A failed write to the log is reported but never stops the loop.
 
 ## Queue view
 
-`bun run queue` starts a separate, read-only process that shows what the loop will do next: `GET /` is an HTML page
-(running tasks, then the ranked queue) and `GET /api/queue` is the same data as JSON. Anything else is a 404. It binds
-to `127.0.0.1` only, on `QUEUE_PORT` (default `4040`). It reads tasks, open PRs and attempt counts, and never writes or
-calls `attempts.sync`. The PR listing is cached for about 10 seconds; if `gh` fails, the page still returns 200 with
-tasks only and an error banner (and an `error` field in the JSON).
+`bun run queue` starts a separate, read-only process bound to `127.0.0.1` on `QUEUE_PORT` (default `4040`). It never
+writes anything.
 
-### History section
+- `GET /`: an HTML page with running tasks, the ranked queue, and a **History** section showing the latest 100 runs,
+  newest first, with a count per outcome. Filter it with `?outcome=success|failure|skip`.
+- `GET /api/queue`: the queue as JSON.
+- `GET /api/history?outcome=`: `{ rows, total, shown, counts }` as JSON. `counts` always covers the whole log.
+- Anything else returns 404.
 
-Below the queue, `GET /` shows a **History** section: recent audit-log runs, newest first, with a count chip per
-outcome. Filter with `?outcome=success|failure|skip` (the chips are links); any other value shows all runs.
-`GET /api/history?outcome=` returns `{rows, total, shown, counts}` as JSON; `counts` always covers the whole log, not
-just the filter. The audit log is read on every request and never written. If it cannot be read (for example a corrupt
-line), the history section shows an error banner while the queue still renders with a 200, and `/api/history` returns
-an `error` field with empty rows and a 200.
+The PR list is cached for about 10 seconds. If `gh` fails, the page still loads with tasks only and an error banner.
+If the audit log can't be read, the history section shows an error and the queue still renders.
 
-## Lessons
+## CI
 
-Lesson 1 builds the `take_order` and `cook` skills (`skills/`, adapted from app-vitals' `plan` and `dev-task`) and the
-loop (`loop.ts`). A finished copy is tagged `factory-lesson-1-reference`.
+GitHub Actions run on every PR, and on pushes to `main` for CI and secret-scan:
+
+- **CI** (`ci.yml`): `bun install --frozen-lockfile`, lint, typecheck, `bun test`.
+- **pr-title-lint**: PR titles must be Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, …).
+  `cook` titles its PRs `<type>: <task title>`.
+- **secret-scan**: gitleaks over the commit range.

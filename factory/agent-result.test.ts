@@ -95,4 +95,8 @@ describe("AGENT_RESULT_SCHEMA", () => {
     expect(AGENT_RESULT_SCHEMA.required).toEqual(["outcome"]);
     expect(AGENT_RESULT_SCHEMA.properties.outcome.enum).toEqual(["processed", "skipped"]);
   });
+
+  test("has no top-level oneOf/allOf/anyOf, which the API rejects in a tool schema", () => {
+    for (const key of ["oneOf", "allOf", "anyOf"]) expect(AGENT_RESULT_SCHEMA).not.toHaveProperty(key);
+  });
 });

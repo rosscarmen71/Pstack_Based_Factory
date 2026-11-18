@@ -1,0 +1,33 @@
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/** The skills the loop runs headless; each must end with the result report the loop parses. */
+const SKILLS = ["cook", "taste_test", "remake"] as const;
+
+function readSkill(name: string): string {
+  return readFileSync(join(import.meta.dir, "skills", name, "SKILL.md"), "utf8");
+}
+
+/** Text of the `## Result` section, up to the next `## ` heading or the end of the file. */
+function resultSection(text: string): string | null {
+  const match = text.match(/^## Result\s*$([\s\S]*?)(?=^## |(?![\s\S]))/m);
+  return match?.[1] ?? null;
+}
+
+describe.each(SKILLS)("%s skill", (name) => {
+  const text = readSkill(name);
+
+  test("has a Result section naming both outcomes and a reason for skipped", () => {
+    const section = resultSection(text);
+    expect(section).not.toBeNull();
+    expect(section).toMatch(/processed/i);
+    expect(section).toMatch(/skipped/i);
+    expect(section).toMatch(/one-sentence reason/i);
+  });
+
+  test("asks for no result file and no hand-written JSON", () => {
+    expect(text).not.toMatch(/result file/i);
+    expect(resultSection(text) ?? "").not.toMatch(/json/i);
+  });
+});
