@@ -1,8 +1,8 @@
 # Pstack Based Factory
 
->Note: also utalizes some of Matt Pococks skills such as `grilling`, `grill-me`, `grill-with-docs`, and `domain-modeling`.
+>Note: also utalizes some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main) such as `grilling`, `grill-me`, `grill-with-docs`, and `domain-modeling`.
 
->Note: also uses some skill outlined from app-vitals.
+>Note: the factory layout and files are adapted from [app-vitals how-to-factory repo](https://github.com/app-vitals/how-to-factory/tree/main).
 
 ## PR routing
 
