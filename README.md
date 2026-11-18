@@ -1,5 +1,7 @@
 # Pstack Based Factory
 
+This repo contains a smple software factory wich heavaly utalizes [pstack skills](https://github.com/cursor/plugins/tree/main/pstack).
+
 >Note: also utalizes some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main) such as `grilling`, `grill-me`, `grill-with-docs`, and `domain-modeling`.
 
 >Note: the factory layout and files are adapted from [app-vitals how-to-factory repo](https://github.com/app-vitals/how-to-factory/tree/main).
