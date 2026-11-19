@@ -524,3 +524,108 @@ describe("customize_order", () => {
     expect(needsOf(m, "order-a")).toEqual([]);
   });
 });
+
+describe("a task id reused by a later order", () => {
+  const ID = "smoke-trying-this-out";
+  const BRANCH = `docs/${ID}`;
+  const created = "2026-11-19T11:08:39.913Z";
+  const approve = (commit: string, submittedAt: string) => ({ state: "APPROVED", body: "Verdict: APPROVE", submittedAt, commit });
+  const customizeAsk = (createdAt: string) => ({ body: "/customize_order change it", createdAt });
+  const prOf = (number: number, over: Partial<PrInfo>) =>
+    pr({ number, url: `https://github.com/o/r/pull/${number}`, branch: BRANCH, headSha: `head${number}`, ...over });
+  const real = () => [
+    prOf(17, { createdAt: "2026-11-19T11:11:14Z", reviews: [approve("head17", "2026-11-19T11:15:00Z")] }),
+    prOf(15, {
+      createdAt: "2026-11-19T10:41:05Z",
+      state: "CLOSED",
+      closedAt: "2026-11-19T11:06:55Z",
+      comments: [customizeAsk("2026-11-19T10:50:00Z")],
+      reviews: [approve("head15", "2026-11-19T10:45:00Z")],
+    }),
+    prOf(13, {
+      createdAt: "2026-11-19T10:25:25Z",
+      state: "CLOSED",
+      closedAt: "2026-11-19T10:36:24Z",
+      reviews: [approve("head13", "2026-11-19T10:30:00Z")],
+    }),
+  ];
+  const needPrs = (m: ReturnType<typeof buildModel>) =>
+    m.details.get(`order-${ID}`)?.needs.map((n) => `${n.kind}:${n.id.split(":")[1] ?? ""}`) ?? [];
+
+  test("only the task's own PR raises needs; PRs from before it was created raise none", () => {
+    const tasks = [task(ID, { status: "pr", createdAt: created })];
+    const m = buildModel(snap({ tasks, prs: real(), now: Date.parse("2026-11-19T12:00:00Z") }));
+    expect(needPrs(m)).toEqual(["ready_for_review:17"]);
+    // The old PRs get no lane either: nothing is unlinked.
+    expect(m.sessions.map((s) => s.adw_id)).toEqual([`order-${ID}`]);
+    expect(m.details.get(`order-${ID}`)?.lane_meta[ID]?.pr?.number).toBe(17);
+  });
+
+  test("runs against PRs from before the task are dropped too", () => {
+    const tasks = [task(ID, { status: "pr", createdAt: created })];
+    const old = transcript({ sessionId: "r15", kind: "taste_test", target: "15", startedAt: "2026-11-19T10:42:00Z", lastAt: "2026-11-19T10:44:00Z" });
+    const m = buildModel(snap({ tasks, prs: real(), transcripts: [old], now: Date.parse("2026-11-19T12:00:00Z") }));
+    expect(m.details.get(`order-${ID}`)?.phases.filter((p) => p.name === "taste_test")).toEqual([]);
+    expect(m.sessions.some((s) => s.adw_id === UNLINKED_ID)).toBe(false);
+  });
+
+  test("a task cooked again shows only the newer PR's needs", () => {
+    const tasks = [task("a", { status: "pr", createdAt: at(0) })];
+    const prs = [
+      pr({ number: 2, url: "https://github.com/o/r/pull/2", createdAt: at(30), headSha: "h2", reviews: [{ state: "APPROVED", body: "Verdict: APPROVE", submittedAt: at(35), commit: "h2" }] }),
+      pr({
+        number: 1,
+        state: "CLOSED",
+        closedAt: at(20),
+        createdAt: at(5),
+        headSha: "h1",
+        reviews: [{ state: "APPROVED", body: "Verdict: APPROVE", submittedAt: at(8), commit: "h1" }],
+        comments: [{ body: "/customize_order x", createdAt: at(10) }],
+      }),
+    ];
+    const m = buildModel(snap({ tasks, prs }));
+    expect(m.details.get("order-a")?.needs.map((n) => n.id)).toEqual(["ready_for_review:2"]);
+    expect(m.details.get("order-a")?.lane_meta.a?.pr?.number).toBe(2);
+  });
+
+  test("a cook transcript that started before the task was created is not in its lane", () => {
+    const tasks = [task("a", { status: "pr", createdAt: at(10) })];
+    const stale = transcript({ sessionId: "s0", target: "a", startedAt: at(2), lastAt: at(4) });
+    const fresh = transcript({ sessionId: "s1", target: "a", startedAt: at(12), lastAt: at(14) });
+    const m = buildModel(snap({ tasks, transcripts: [stale, fresh], audit: [audit({ at: at(5) }), audit({ at: at(15) })] }));
+    expect(m.details.get("order-a")?.phases.filter((p) => p.name === "cook").map((p) => p.phase_id)).toEqual(["run:s1"]);
+    expect(m.sessions.some((s) => s.adw_id === UNLINKED_ID)).toBe(false);
+  });
+
+  test("a task without createdAt still matches by branch alone", () => {
+    const m = buildModel(
+      snap({
+        tasks: [task("a", { status: "pr", createdAt: undefined })],
+        prs: [pr({ createdAt: at(-500), reviews: [{ state: "APPROVED", body: "Verdict: APPROVE", submittedAt: at(8), commit: "head1" }] })],
+      }),
+    );
+    expect(m.details.get(`${UNDATED_ID}`)?.needs.map((n) => n.kind)).toEqual(["ready_for_review"]);
+  });
+});
+
+describe("session project", () => {
+  test("is the order's tasks' project, the first task's when they differ, and null when absent", () => {
+    const m = buildModel(
+      snap({
+        tasks: [
+          task("a", { project: "alpha", createdAt: at(0) }),
+          task("b", { project: "beta", createdAt: at(1) }),
+          task("c", { createdAt: at(60) }),
+        ],
+      }),
+    );
+    const projects = Object.fromEntries(m.sessions.map((s) => [s.adw_id, s.project]));
+    expect(projects).toEqual({ "order-a": "alpha", "order-c": null });
+    expect(m.details.get("order-a")?.session.project).toBe("alpha");
+  });
+
+  test("the unlinked PRs session has no project", () => {
+    const m = buildModel(snap({ tasks: [], prs: [pr({ branch: "chore/zzz", number: 9 })], transcripts: [transcript({ target: "9", kind: "taste_test" })] }));
+    expect(m.sessions.find((s) => s.adw_id === UNLINKED_ID)?.project).toBeNull();
+  });
+});

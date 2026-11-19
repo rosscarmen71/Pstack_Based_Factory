@@ -313,7 +313,37 @@ export interface Run {
   pr: PrInfo | null;
 }
 
-const taskForBranch = (tasks: Task[], branch: string) => tasks.find((t) => branch.endsWith(`/${t.id}`)) ?? null;
+const branchIsOf = (task: Task, branch: string) => branch.endsWith(`/${task.id}`);
+
+/**
+ * A task id can be reused by a later order, so the branch alone does not say whose PR it is. A PR belongs to a task
+ * only if its branch ends in the task id and it was opened at or after the task was created. A task with no
+ * createdAt keeps the branch-only match.
+ */
+export function ownsPr(task: Task, pr: Pick<PrInfo, "branch" | "createdAt">): boolean {
+  if (!branchIsOf(task, pr.branch)) return false;
+  const created = task.createdAt ? Date.parse(task.createdAt) : Number.NaN;
+  return !Number.isFinite(created) || Date.parse(pr.createdAt) >= created;
+}
+
+const ownerOfPr = (tasks: Task[], pr: PrInfo) => tasks.find((t) => ownsPr(t, pr)) ?? null;
+
+/** A PR on a current task's branch that opened before that task existed: it belongs to an earlier order, so the model leaves it out. */
+const isPastPr = (tasks: Task[], pr: PrInfo) => !ownerOfPr(tasks, pr) && tasks.some((t) => branchIsOf(t, pr.branch));
+
+/** The PR a task is on now: the newest one it owns (an earlier one means the task was cooked again). */
+const currentPrOf = (prs: PrInfo[], task: Task): PrInfo | null =>
+  prs.filter((p) => ownsPr(task, p)).toSorted((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null;
+
+/** A run from before its task existed belongs to an earlier use of the id (cook), or to a PR of an earlier order (the others). */
+function isPastRun(snap: Snapshot, r: Run): boolean {
+  if (r.kind === "cook") {
+    const created = snap.tasks.find((t) => t.id === r.target)?.createdAt;
+    return created !== undefined && Date.parse(r.startedAt) < Date.parse(created);
+  }
+  const pr = snap.prs.find((p) => String(p.number) === r.target);
+  return pr !== undefined && isPastPr(snap.tasks, pr);
+}
 
 /** auditless: the run kind never gets an audit row (customize_order), so ending without one is not a failure. */
 export function runStatus(audit: AuditEntry | null, live: boolean, auditless = false): RunStatus {
@@ -353,7 +383,7 @@ export function buildRuns(snap: Snapshot): Run[] {
     const startedAt = new Date(Date.parse(a.at) - a.durationMs).toISOString();
     runs.push(makeRun(snap, RUN_KIND[a.action], String(a.target), `audit:${a.at}`, startedAt, a, null, false));
   }
-  return runs.toSorted((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  return runs.filter((r) => !isPastRun(snap, r)).toSorted((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
 }
 
 function makeRun(
@@ -366,11 +396,14 @@ function makeRun(
   transcript: Transcript | null,
   live: boolean,
 ): Run {
+  const task = kind === "cook" ? snap.tasks.find((t) => t.id === target) : undefined;
+  // A cook's PR is the first its task owns that opened after the run began (the task may have been cooked again); else the newest.
+  const owned = task ? snap.prs.filter((p) => ownsPr(task, p)).toSorted((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)) : [];
   const pr =
     kind === "cook"
-      ? (snap.prs.find((p) => taskForBranch(snap.tasks, p.branch)?.id === target) ?? null)
+      ? (owned.find((p) => Date.parse(p.createdAt) >= Date.parse(startedAt) - 5_000) ?? owned.at(-1) ?? null)
       : (snap.prs.find((p) => String(p.number) === target) ?? null);
-  const lane = kind === "cook" ? target : (pr && taskForBranch(snap.tasks, pr.branch)?.id) || `PR #${target}`;
+  const lane = kind === "cook" ? target : (pr && ownerOfPr(snap.tasks, pr)?.id) || `PR #${target}`;
   const status = runStatus(audit, live, AUDIT_ACTION[kind] === null);
   const endedAt = status === "running" ? null : (audit?.at ?? transcript?.lastAt ?? startedAt);
   return { id, kind, target, lane, startedAt, endedAt, status, audit, transcript, pr };
@@ -415,7 +448,10 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
   }
 
   for (const pr of snap.prs) {
-    const task = taskForBranch(snap.tasks, pr.branch);
+    // A task's needs come from its current PR only; earlier PRs, and PRs of an earlier order that used the id, are history.
+    if (isPastPr(snap.tasks, pr)) continue;
+    const task = ownerOfPr(snap.tasks, pr);
+    if (task && currentPrOf(snap.prs, task)?.number !== pr.number) continue;
     const lane = task?.id ?? `PR #${pr.number}`;
     const closedAt = pr.mergedAt ?? pr.closedAt;
     const prRuns = runs.filter((r) => r.lane === lane);
@@ -718,7 +754,7 @@ export function buildModel(snap: Snapshot): Model {
       const rs = laneRuns[li] ?? [];
       const deps = task?.dependencies ?? [];
       const depText = deps.map((d) => (order.taskIds.includes(d) ? d : `${d} (other order)`)).join(", ");
-      const pr = rs.find((r) => r.pr)?.pr;
+      const pr = (task ? currentPrOf(snap.prs, task) : null) ?? rs.findLast((r) => r.pr)?.pr;
       laneMeta[lane] = task
         ? { title: task.id, subtitle: deps.length ? `needs ${depText}` : "no dependencies" }
         : { title: lane, subtitle: pr?.branch ?? "no task matches this branch" };
@@ -831,6 +867,8 @@ export function buildModel(snap: Snapshot): Model {
       total_tokens: tokenTotal(tokens),
       total_cost: null,
       archived: 0,
+      // An order's tasks share a project; if they ever differ, the first task's wins.
+      project: isTaskOrder ? (tasks[0]?.project ?? null) : null,
     };
     events.sort((a, b) => Date.parse(a.started_at ?? "") - Date.parse(b.started_at ?? "") || a.event_id.localeCompare(b.event_id));
     for (const [i, e] of events.entries()) e.rowid = i + 1;
