@@ -111,12 +111,15 @@ Tasks without `createdAt` go last.
 **PRs.** `pr-state.ts` decides what each open PR needs. The first matching rule wins:
 
 1. Draft, or labelled `needs-human` → nothing
-2. CI failing, merge conflict, or changes requested → **patch** (`/remake`)
+2. CI failing, merge conflict, changes requested, or labelled `changes-requested` → **patch** (`/remake`)
 3. Approved with CI passing → nothing
 4. New commits since the last review → **review** (`/taste_test`)
 5. Anything else → nothing
 
-- PRs on a task's own branch (`<type>/<task-id>`) belong to that task. The loop doesn't review or patch them.
+- PRs that `/cook` opened are reviewed and patched like any other open PR.
+- The factory usually authors its own PRs, and GitHub won't let an author request changes. So `/taste_test` adds the
+  `changes-requested` label when it finds problems, and `/remake` removes it after pushing a fix. The new commit is
+  then reviewed again.
 - Every review or patch run counts as an attempt, whether it passes or fails. After `MAX_PR_ATTEMPTS` (3), the loop
   labels the PR `needs-human`, comments once, and stops working on it. Removing the label resets the count.
 - A failed or skipped review or patch is logged, and the loop carries on. A review that exits 0 (processed or

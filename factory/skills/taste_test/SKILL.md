@@ -52,11 +52,16 @@ Load each by reading that file with the Read tool; do not use the Skill tool for
    GitHub rejects `--approve` and `--request-changes` on your own PR ("Can not approve your own pull request"), which
    happens when the reviewer and the PR author share a `gh` login. Then post the same body with `--comment`, and start
    it with a `Verdict: APPROVE` or `Verdict: CHANGES` line. Report the review URL.
+6. **Set the label.** The loop reads the `changes-requested` label, not the review, because a `--comment` review
+   carries no verdict GitHub can see. After posting:
+   - Request changes: run `gh label create changes-requested --force --description "Factory review found problems"`,
+     then `gh pr edit <pr> --add-label changes-requested`.
+   - Approve: if the PR has the label, run `gh pr edit <pr> --remove-label changes-requested`.
 
 ## Rules
 
 - Never edit code, never push, never merge.
-- Post exactly one review per run; do not add separate comments.
+- Post exactly one review per run; do not add separate comments. The label in step 6 is not a comment.
 - Do not edit `factory/tasks.json`; `status` is moved by the loop.
 - Exit non-zero if no review was posted; the loop reads exit 0 as "reviewed".
 - The session starts in the repo root, so `cd` is not needed.

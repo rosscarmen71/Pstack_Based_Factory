@@ -39,6 +39,14 @@ describe("decidePr", () => {
     expect(decidePr(pr({ reviewDecision: "changes_requested" }), {})).toBe("patch");
   });
 
+  test("changes-requested label -> patch, even on an already-reviewed head", () => {
+    expect(decidePr(pr({ labels: ["changes-requested"] }), { reviewedSha: "sha-new" })).toBe("patch");
+  });
+
+  test("changes-requested label with needs-human -> none", () => {
+    expect(decidePr(pr({ labels: ["changes-requested", "needs-human"] }), {})).toBe("none");
+  });
+
   test("approved with CI pass -> none, even on an unreviewed head", () => {
     expect(decidePr(pr({ reviewDecision: "approved" }), {})).toBe("none");
   });
