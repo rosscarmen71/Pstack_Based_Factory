@@ -65,6 +65,8 @@ export interface PrReview {
   state: string;
   body: string;
   submittedAt: string;
+  /** The commit the review was left on. */
+  commit: string;
 }
 
 export interface PrInfo {
@@ -78,6 +80,7 @@ export interface PrInfo {
   mergedAt: string | null;
   closedAt: string | null;
   ci: "pass" | "fail" | "pending";
+  headSha: string;
   labels: string[];
   reviews: PrReview[];
   commitDates: string[];
@@ -89,9 +92,13 @@ export interface LabelEvent {
   at: string;
 }
 
-/** A stuck-in_progress sighting the visualizer itself recorded (it leaves no trace in the factory's files). */
+const WARNING_KINDS = ["agent_silent", "running_long", "task_stranded"] as const;
+export type WarningKind = (typeof WARNING_KINDS)[number];
+
+/** A run warning the visualizer itself recorded (it leaves no trace in the factory's files). key is the run id, or the task id for task_stranded. */
 export interface StuckHistoryEntry {
-  taskId: string;
+  kind: WarningKind;
+  key: string;
   raisedAt: string;
   resolvedAt?: string;
 }
@@ -109,7 +116,7 @@ export interface Snapshot {
 
 // ── Outputs beyond their shared types ───────────────────────────────────────
 
-export type NeedKind = "loop_stopped" | "needs_human" | "stuck_changes" | "ready_for_review" | "stuck_in_progress";
+export type NeedKind = "loop_stopped" | "needs_human" | "stuck_changes" | "ready_for_review" | WarningKind;
 
 export interface Need {
   id: string;
@@ -157,7 +164,7 @@ export interface Model {
   envelopes: Map<string, Envelope[]>;
   /** Live runs, by transcript session id, for take-over and the feed. */
   liveSessions: Set<string>;
-  /** Stuck-in_progress sightings to persist; factory-source.ts writes them. */
+  /** Run warnings to persist; factory-source.ts writes them. */
   stuckHistory: StuckHistoryEntry[];
 }
 
@@ -169,6 +176,11 @@ export const ORDER_GAP_MS = 5 * 60_000;
 export const LIVE_WRITE_MS = 120_000;
 export const UNLINKED_ID = "unlinked-prs";
 export const UNDATED_ID = "tasks-without-a-date";
+
+/** A running agent whose transcript has been quiet this long is probably hung. */
+export const SILENT_MS = 5 * 60_000;
+/** Normal runs take a few minutes; a run past this is worth a look. */
+export const LONG_RUN_MS = 15 * 60_000;
 
 /** A run whose transcript ended with no audit row: it ran outside the loop, or was cut off before the loop recorded it. */
 const NO_AUDIT_TEXT = "no result in the audit log (ran outside the loop, or was cut off)";
@@ -338,6 +350,7 @@ function makeRun(
 // ── Needs ───────────────────────────────────────────────────────────────────
 
 const VERDICT_CHANGES = /Verdict:\s*\**\s*CHANGES/i;
+const VERDICT_APPROVE = /Verdict:\s*\**\s*APPROVE/i;
 
 function firstAfter(dates: (string | null)[], after: string): string | null {
   const t0 = Date.parse(after);
@@ -418,47 +431,71 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
       });
     }
 
-    if (task && (pr.state !== "OPEN" || pr.ci === "pass")) {
+    const verdict = pr.reviews.filter((r) => r.commit === pr.headSha).toSorted((x, y) => x.submittedAt.localeCompare(y.submittedAt)).at(-1);
+    const blocked = pr.labels.some((l) => l === "changes-requested" || l === "needs-human");
+    if (task && verdict && VERDICT_APPROVE.test(verdict.body) && pr.ci === "pass" && !blocked) {
       needs.push({
         id: `ready_for_review:${pr.number}`,
         kind: "ready_for_review",
         severity: "review",
         title: "Ready for your review",
-        description: `PR #${pr.number} for ${task.id} is open with CI green. Review and merge it on GitHub; the loop never merges.`,
+        description: `taste_test approved PR #${pr.number} for ${task.id} and CI is green. Review and merge it on GitHub; the loop never merges.`,
         sessionId: sessionOfLane(lane),
         lane,
-        phaseId: anchor(pr.createdAt),
-        raisedAt: pr.createdAt,
+        phaseId: anchor(verdict.submittedAt),
+        raisedAt: verdict.submittedAt,
         resolvedAt: closedAt,
         goTo,
       });
     }
   }
 
-  const stuckNow = new Set(
-    snap.tasks
-      .filter((t) => t.status === "in_progress" && !runs.some((r) => r.lane === t.id && r.status === "running"))
-      .map((t) => t.id),
-  );
-  const history = snap.stuckHistory.map((h) => ({ ...h }));
-  for (const h of history) if (!h.resolvedAt && !stuckNow.has(h.taskId)) h.resolvedAt = nowIso;
-  for (const id of stuckNow) {
-    if (!history.some((h) => h.taskId === id && !h.resolvedAt)) history.push({ taskId: id, raisedAt: nowIso });
+  const active = new Set<string>();
+  for (const r of runs) {
+    if (r.status !== "running") continue;
+    if (r.transcript && snap.now - r.transcript.mtimeMs >= SILENT_MS) active.add(`agent_silent:${r.id}`);
+    if (snap.now - Date.parse(r.startedAt) >= LONG_RUN_MS) active.add(`running_long:${r.id}`);
+  }
+  if (!snap.loopRunning) for (const t of snap.tasks) if (t.status === "in_progress") active.add(`task_stranded:${t.id}`);
+
+  const history = snap.stuckHistory.filter((h) => (WARNING_KINDS as readonly string[]).includes(h.kind)).map((h) => ({ ...h }));
+  for (const h of history) if (!h.resolvedAt && !active.has(`${h.kind}:${h.key}`)) h.resolvedAt = nowIso;
+  for (const id of active) {
+    if (!history.some((h) => `${h.kind}:${h.key}` === id && !h.resolvedAt)) {
+      const [kind, ...key] = id.split(":");
+      history.push({ kind: kind as WarningKind, key: key.join(":"), raisedAt: nowIso });
+    }
   }
   for (const h of history) {
-    const last = runs.filter((r) => r.lane === h.taskId).at(-1);
+    const common = { id: `${h.kind}:${h.key}:${h.raisedAt}`, kind: h.kind, raisedAt: h.raisedAt, resolvedAt: h.resolvedAt ?? null };
+    if (h.kind === "task_stranded") {
+      const last = runs.filter((r) => r.lane === h.key).at(-1);
+      needs.push({
+        ...common,
+        severity: "broken",
+        title: "Task stranded in progress",
+        description: `${h.key} is marked in_progress but the loop is not running. Set it back to pending to retry.`,
+        sessionId: sessionOfLane(h.key),
+        lane: h.key,
+        phaseId: last?.id ?? null,
+        goTo: last ? runOpen(last) : { kind: "run", phaseId: "" },
+      });
+      continue;
+    }
+    const r = runs.find((x) => x.id === h.key);
+    if (!r) continue;
+    const silent = h.kind === "agent_silent";
     needs.push({
-      id: `stuck_in_progress:${h.taskId}:${h.raisedAt}`,
-      kind: "stuck_in_progress",
-      severity: "broken",
-      title: "Task stuck in progress",
-      description: `${h.taskId} is marked in_progress but no run is working on it, usually because a run crashed or the loop was killed. Set it back to pending to retry.`,
-      sessionId: sessionOfLane(h.taskId),
-      lane: h.taskId,
-      phaseId: last?.id ?? null,
-      raisedAt: h.raisedAt,
-      resolvedAt: h.resolvedAt ?? null,
-      goTo: last ? runOpen(last) : { kind: "run", phaseId: "" },
+      ...common,
+      severity: "review",
+      title: silent ? "Agent has gone quiet" : "Run is taking long",
+      description: silent
+        ? `The ${r.kind} run on ${r.target} has written nothing for ${SILENT_MS / 60_000} minutes. It may be hung; open the run to check.`
+        : `The ${r.kind} run on ${r.target} has been going for ${LONG_RUN_MS / 60_000} minutes or more; normal runs take a few. It may still be making progress.`,
+      sessionId: sessionOfLane(r.lane),
+      lane: r.lane,
+      phaseId: r.id,
+      goTo: runOpen(r),
     });
   }
 
