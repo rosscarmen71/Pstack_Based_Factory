@@ -147,6 +147,13 @@ PRs. The factory posts as your GitHub login, so it only acts on comments that st
 
 When there's nothing to do, the loop sleeps `LOOP_IDLE_MS` (60 s) and checks again.
 
+**One loop at a time.** The loop writes its pid to `factory/loop.lock`. A second `bun run loop` exits at once, naming
+the running loop's pid and start time. A lock left by a killed loop is replaced.
+
+**`/customize_order` windows.** When a PR gets a `/customize_order` comment, the loop opens a macOS Terminal window
+running `claude "/customize_order <pr>"` in the repo, once per comment, and records it in
+`factory/customize-windows.json`. Off macOS it logs the command to run instead.
+
 ### Agent Permissions
 
 Each run gets `--allowedTools` from `ALLOWED_TOOLS` in `factory/loop.ts`: `Read`, `Edit`, `Write`, `Glob`, `Grep`,

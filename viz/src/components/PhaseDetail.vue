@@ -7,6 +7,7 @@ import type {
   FeedItem,
   GateCheck,
   GateResult,
+  NeedKind,
   Phase,
   ToolCallPayload,
 } from '../lib/types'
@@ -16,6 +17,7 @@ import {
   Brain,
   ClipboardList,
   Fingerprint,
+  GitPullRequest,
   Inbox,
   Package,
   Radio,
@@ -29,7 +31,7 @@ import { fmtClock, payloadOk, ts } from '../lib/format'
 import { highlightJson, highlightJsonText } from '../lib/highlight'
 import { eventLabel, parseAgentStart, parseToolCall } from '../lib/events'
 import { modelIcon, modelName } from '../lib/models'
-import { fetchFeed, takeOver } from '../lib/api'
+import { fetchFeed, openCustomizeTerminal, takeOver } from '../lib/api'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import DetailSection from './DetailSection.vue'
@@ -39,6 +41,12 @@ const props = defineProps<{
   events: EventRow[]
   envelopes: Envelope[]
   gates: GateResult[]
+  /** The lane's pull request, when it has one. */
+  pr: { number: number; url: string } | null
+  /** Kind of the newest open need on this block; decides what the panel focuses when it opens. */
+  focusKind: NeedKind | null
+  /** Bumped when the block is clicked, so focus is re-applied even if this panel is already open. */
+  focusSeq: number
 }>()
 
 defineEmits<{ close: [] }>()
@@ -262,8 +270,8 @@ function argsHtml(call: ToolCallPayload | null): string {
 // (a stable string), so the 500ms poll replacing the phase object never resets
 // a user's open/closed choices — only selecting a different phase does.
 
-// The checklist, task and feed start open; the rest the engineer opens as needed.
-const DEFAULT_OPEN_SECTIONS: string[] = ['gates', 'task', 'feed']
+// The PR and Terminal buttons, checklist, task and feed start open; the rest the engineer opens as needed.
+const DEFAULT_OPEN_SECTIONS: string[] = ['pr', 'terminal', 'gates', 'task', 'feed']
 const openSections = reactive(new Set<string>(DEFAULT_OPEN_SECTIONS))
 
 watch(
@@ -279,6 +287,49 @@ function toggleSection(id: string) {
   if (openSections.has(id)) openSections.delete(id)
   else openSections.add(id)
 }
+
+// ── Focus: what the newest open need on this block is about ──────────────────
+// PR needs focus the "Open PR" button; a task-change request focuses the agent feed and its Terminal button.
+
+const PR_NEEDS: NeedKind[] = ['ready_for_review', 'stuck_changes', 'needs_human']
+
+const showTerminal = computed(
+  () => props.pr !== null && (props.phase.name === 'customize_order' || props.focusKind === 'task_change_requested'),
+)
+
+const prSec = useTemplateRef<HTMLElement>('prSec')
+const termSec = useTemplateRef<HTMLElement>('termSec')
+const prBtn = useTemplateRef<HTMLElement>('prBtn')
+const termBtn = useTemplateRef<HTMLElement>('termBtn')
+const flash = ref<'pr' | 'terminal' | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | undefined
+
+async function applyFocus() {
+  const kind = props.focusKind
+  const target =
+    kind && PR_NEEDS.includes(kind) && props.pr
+      ? 'pr'
+      : kind === 'task_change_requested' && showTerminal.value
+        ? 'terminal'
+        : null
+  if (!target) return
+  if (target === 'pr') openSections.add('pr')
+  else {
+    openSections.add('terminal')
+    openSections.add('feed')
+  }
+  await nextTick()
+  const sec = target === 'pr' ? prSec.value : termSec.value
+  const btn = target === 'pr' ? prBtn.value : termBtn.value
+  sec?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  btn?.focus({ preventScroll: true })
+  flash.value = target
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => (flash.value = null), 2500)
+}
+
+// After the phase watcher above, so a newly selected phase has its sections reset before focus opens one.
+watch(() => [props.phase.phase_id, props.focusSeq], () => void applyFocus(), { immediate: true })
 
 const typeClass: Record<string, string> = {
   gate_fail: 't-red',
@@ -309,6 +360,27 @@ async function doTakeOver() {
     }
   } catch (err) {
     takeState.value = { kind: 'err', text: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// ── Terminal window of the /customize_order agent ────────────────────────────
+
+const termState = ref<{ kind: 'busy' | 'ok' | 'err'; text: string } | null>(null)
+
+async function doOpenTerminal() {
+  if (!props.pr) return
+  termState.value = { kind: 'busy', text: 'Bringing the window forward…' }
+  try {
+    const r = await openCustomizeTerminal(props.pr.number)
+    termState.value = {
+      kind: 'ok',
+      text:
+        r.action === 'focused'
+          ? 'Brought its Terminal window forward.'
+          : 'That window was gone, so a new one is running /customize_order.',
+    }
+  } catch (err) {
+    termState.value = { kind: 'err', text: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -352,6 +424,7 @@ watch(
     feedLive.value = false
     feedError.value = null
     takeState.value = null
+    termState.value = null
     void pumpFeed(feedGen)
   },
   { immediate: true },
@@ -376,6 +449,7 @@ watch(
 )
 
 onUnmounted(() => {
+  clearTimeout(flashTimer)
   clearTimeout(feedTimer)
   feedGen += 1
 })
@@ -433,6 +507,19 @@ onUnmounted(() => {
 
     <div class="d-grid">
       <div class="d-col">
+        <div v-if="pr" ref="prSec" class="focus-sec" :class="{ flash: flash === 'pr' }">
+          <DetailSection
+            title="pull request"
+            :icon="GitPullRequest"
+            :open="openSections.has('pr')"
+            @toggle="toggleSection('pr')"
+          >
+            <a ref="prBtn" class="action-btn" :href="pr.url" target="_blank" rel="noopener">
+              <GitPullRequest :size="18" :stroke-width="2" /> Open PR #{{ pr.number }}
+            </a>
+          </DetailSection>
+        </div>
+
         <DetailSection
           v-if="requestText"
           title="request"
@@ -541,6 +628,31 @@ onUnmounted(() => {
             </div>
           </div>
         </DetailSection>
+
+        <div v-if="showTerminal" ref="termSec" class="focus-sec" :class="{ flash: flash === 'terminal' }">
+          <DetailSection
+            title="terminal window"
+            :icon="SquareTerminal"
+            :open="openSections.has('terminal')"
+            @toggle="toggleSection('terminal')"
+          >
+            <p class="dim d-desc">
+              The /customize_order agent asks its questions in a Terminal window. Answer there; this brings that
+              window forward, or reopens it if it was closed.
+            </p>
+            <button
+              ref="termBtn"
+              class="action-btn"
+              :disabled="termState?.kind === 'busy'"
+              @click="doOpenTerminal"
+            >
+              <Terminal :size="18" :stroke-width="2" /> Open its Terminal window
+            </button>
+            <span v-if="termState" class="action-note" :class="termState.kind === 'err' ? 't-red' : 't-green'">{{
+              termState.text
+            }}</span>
+          </DetailSection>
+        </div>
 
         <DetailSection
           v-if="uuid"
@@ -840,6 +952,59 @@ onUnmounted(() => {
 .takeover:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in srgb, var(--cyan) 10%, transparent);
+  border: 1px solid var(--cyan);
+  border-radius: 6px;
+  color: var(--cyan);
+  font-family: inherit;
+  font-size: 16px;
+  text-decoration: none;
+  cursor: pointer;
+  padding: 4px 14px;
+}
+
+.action-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--cyan) 20%, transparent);
+}
+
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.action-btn:focus-visible,
+.focus-sec.flash .action-btn {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+
+.action-note {
+  margin-left: 12px;
+}
+
+/* A focused section glows briefly so the eye finds it after the scroll. */
+.focus-sec {
+  border-radius: 8px;
+}
+
+.focus-sec.flash {
+  animation: focus-glow 2.5s ease-out;
+}
+
+@keyframes focus-glow {
+  0%,
+  60% {
+    background: color-mix(in srgb, var(--cyan) 14%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
 }
 
 .d-takeover {

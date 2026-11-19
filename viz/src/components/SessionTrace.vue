@@ -415,10 +415,10 @@ const needDots = computed(() => {
   })
 })
 
-// ── Highlight: a clicked dot points at its block; the block then follows goTo ──
+// ── Highlight: a clicked dot scrolls to and lights up its block. Clicking a block always opens its run panel. ──
 
 const HIGHLIGHT_MS = 6000
-const highlight = ref<{ phaseId: string; goTo: Need['goTo'] } | null>(null)
+const highlight = ref<{ phaseId: string } | null>(null)
 let highlightTimer: ReturnType<typeof setTimeout> | undefined
 const root = useTemplateRef<HTMLElement>('root')
 
@@ -434,7 +434,7 @@ async function onDotClick(need: Need) {
     return
   }
   const phaseId = need.phaseId
-  highlight.value = { phaseId, goTo: need.goTo }
+  highlight.value = { phaseId }
   clearTimeout(highlightTimer)
   highlightTimer = setTimeout(() => (highlight.value = null), HIGHLIGHT_MS)
   await nextTick()
@@ -444,16 +444,24 @@ async function onDotClick(need: Need) {
   el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
+// Bumped on every block click, so the panel re-applies its focus even when that block's panel is already open.
+const focusSeq = ref(0)
+
+// A block click always opens its run panel and never closes it (the panel's ✕ does that).
 function onBlockClick(p: Phase) {
-  const hl = highlight.value
-  if (hl && hl.phaseId === p.phase_id) {
-    highlight.value = null
-    clearTimeout(highlightTimer)
-    followGoTo(hl.goTo)
-    return
-  }
-  selectPhase(p)
+  highlight.value = null
+  clearTimeout(highlightTimer)
+  focusSeq.value += 1
+  if (p.phase_id !== props.phaseId) navigate(props.adwId, p.phase_id)
 }
+
+// What the open panel focuses: the kind of the newest open need anchored to its block, if any.
+const focusKind = computed<Need['kind'] | null>(() => {
+  const id = props.phaseId
+  if (!id) return null
+  const open = needs.value.filter((n) => n.phaseId === id && n.resolvedAt === null)
+  return open.toSorted((a, b) => a.raisedAt.localeCompare(b.raisedAt)).at(-1)?.kind ?? null
+})
 
 // ── Hover tooltip (fixed-position: the tracks clip their overflow) ───────────
 
@@ -496,9 +504,6 @@ function blockTip(e: MouseEvent, p: Phase) {
   }
 }
 
-function selectPhase(p: Phase) {
-  navigate(props.adwId, p.phase_id === props.phaseId ? null : p.phase_id)
-}
 </script>
 
 <template>
@@ -716,6 +721,9 @@ function selectPhase(p: Phase) {
       :events="events"
       :envelopes="envelopes"
       :gates="gates"
+      :pr="laneMeta[selectedPhase.owner ?? '']?.pr ?? null"
+      :focus-kind="focusKind"
+      :focus-seq="focusSeq"
       @close="navigate(props.adwId)"
     />
   </div>

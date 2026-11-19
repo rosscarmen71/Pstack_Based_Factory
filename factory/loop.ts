@@ -4,6 +4,11 @@
 import { AGENT_RESULT_SCHEMA, parseAgentResult, toAuditOutcome, type AgentResult } from "./agent-result.ts";
 import { auditStore, type AuditAction, type AuditStore } from "./audit-log.ts";
 import { pickCandidate } from "./candidates.ts";
+import { customizeWindowsStore, type CustomizeWindowsStore } from "./customize-windows.ts";
+import { acquireLoopLock, type AcquireOptions } from "./loop-lock.ts";
+import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, pendingRequest } from "./pr-state.ts";
+import { join } from "node:path";
+import { openTerminalWindow, shq, type OsaRunner } from "./terminal.ts";
 import { attemptsStore, type AttemptsStore } from "./pr-attempts.ts";
 import { ghPrSource, type PrSource, type PullRequest } from "./prs.ts";
 import type { Task } from "./tasks.schema.ts";
@@ -85,6 +90,10 @@ export interface LoopOptions {
   prs?: PrSource;
   attempts?: AttemptsStore;
   runPr?: PrRunner;
+  /** Which /customize_order comments already have a Terminal window. Without it (and `launchCustomize`) the loop opens none. */
+  customizeWindows?: CustomizeWindowsStore;
+  /** Opens a Terminal window running /customize_order for the PR and returns its window id. */
+  launchCustomize?: (pr: PullRequest) => Promise<number>;
   /** Defaults to Bun.sleep; tests inject a fake so they never wait real time. */
   sleep?: (ms: number) => Promise<unknown>;
   /** Aborting stops the loop: immediately when idle, after the current task otherwise. */
@@ -116,7 +125,7 @@ export async function runLoop(
   store: TaskStore,
   run: Runner,
   log: (msg: string) => void = () => {},
-  { sleep = Bun.sleep, signal, prs, attempts = NO_ATTEMPTS, runPr, audit = NO_AUDIT }: LoopOptions = {},
+  { sleep = Bun.sleep, signal, prs, attempts = NO_ATTEMPTS, runPr, audit = NO_AUDIT, customizeWindows, launchCustomize }: LoopOptions = {},
 ): Promise<LoopResult> {
   const ran: string[] = [];
   let stuckKey = "";
@@ -176,6 +185,30 @@ export async function runLoop(
     }
   };
 
+  /**
+   * Opens one Terminal window per unanswered /customize_order comment, so the agent is already running for the human.
+   * A failed launch (for example, not on macOS) is logged and recorded with no window, so it is not retried every pass.
+   */
+  const openCustomizeWindows = async (open: PullRequest[]) => {
+    if (!customizeWindows || !launchCustomize) return;
+    for (const pr of open) {
+      try {
+        const request = pendingRequest(pr, CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING);
+        if (!request || customizeWindows.get(pr.number)?.commentAt === request.createdAt) continue;
+        let windowId: number | null = null;
+        try {
+          windowId = await launchCustomize(pr);
+          log(`opened a Terminal for ${CUSTOMIZE_COMMAND} ${pr.number}`);
+        } catch (err) {
+          log(`could not open a Terminal for ${CUSTOMIZE_COMMAND} ${pr.number}: ${errMsg(err)}; run: claude "${CUSTOMIZE_COMMAND} ${pr.number}"`);
+        }
+        customizeWindows.record({ pr: pr.number, commentAt: request.createdAt, windowId, openedAt: new Date().toISOString() });
+      } catch (err) {
+        log(`could not track the ${CUSTOMIZE_COMMAND} window for PR #${pr.number}: ${errMsg(err)}`);
+      }
+    }
+  };
+
   while (!signal?.aborted) {
     const tasks = store.load();
 
@@ -190,6 +223,8 @@ export async function runLoop(
         open = [];
       }
     }
+
+    await openCustomizeWindows(open);
 
     const { candidate, newlyExceeded } = pickCandidate(tasks, open, attempts);
     for (const pr of newlyExceeded) {
@@ -327,13 +362,38 @@ export interface PrCommands {
   patchCmd?: string[];
 }
 
+/** The repo root, where the agent in the Terminal window must run. */
+const REPO_ROOT = join(import.meta.dir, "..");
+
+/** Opens a Terminal window running `/customize_order <n>` interactively in the repo and returns its window id. */
+export function launchCustomizeInTerminal(pr: Pick<PullRequest, "number">, osa?: OsaRunner): Promise<number> {
+  const claude = process.env.CLAUDE_BIN ?? "claude";
+  return openTerminalWindow(`cd ${shq(REPO_ROOT)} && ${claude} ${shq(`${CUSTOMIZE_COMMAND} ${pr.number}`)}`, osa);
+}
+
+export interface MainOptions extends LoopOptions {
+  /** Where the one-loop lock lives, and how to tell whether its holder is running. Tests inject a temp path. */
+  lock?: AcquireOptions & { path?: string };
+}
+
+/** `HH:MM` in local time. */
+function clock(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 export async function main(
   store: TaskStore = fileStore(),
   agentCmd: string[] = AGENT_CMD,
-  { sleep, signal, prs, attempts, runPr, audit }: LoopOptions = {},
+  { sleep, signal, prs, attempts, runPr, audit, customizeWindows, launchCustomize, lock: lockOptions }: MainOptions = {},
   { reviewCmd = REVIEW_CMD, patchCmd = PATCH_CMD }: PrCommands = {},
 ): Promise<number> {
   store.load(); // validate up front
+  const lock = acquireLoopLock(lockOptions?.path, lockOptions);
+  if (!lock.ok) {
+    console.error(`[loop] a loop is already running (pid ${lock.holder.pid}, started ${clock(lock.holder.startedAt)} local time)`);
+    return 1;
+  }
   const controller = new AbortController();
   const stop = () => controller.abort();
   if (signal?.aborted) stop();
@@ -348,15 +408,26 @@ export async function main(
       attempts,
       runPr: runPr ?? prRunner(reviewCmd, patchCmd),
       audit,
+      customizeWindows,
+      launchCustomize,
     });
     return stoppedOn ? 1 : 0;
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     signal?.removeEventListener("abort", stop);
+    lock.release();
   }
 }
 
 if (import.meta.main) {
-  process.exit(await main(fileStore(), AGENT_CMD, { prs: ghPrSource(), attempts: attemptsStore(), audit: auditStore() }));
+  process.exit(
+    await main(fileStore(), AGENT_CMD, {
+      prs: ghPrSource(),
+      attempts: attemptsStore(),
+      audit: auditStore(),
+      customizeWindows: customizeWindowsStore(),
+      launchCustomize: launchCustomizeInTerminal,
+    }),
+  );
 }

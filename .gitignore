@@ -5,3 +5,7 @@ factory/pr-attempts.json
 factory/pr-attempts.json.tmp
 factory/audit-log*.jsonl
 factory/tasks.json
+factory/loop.lock
+factory/loop.lock.*.tmp
+factory/customize-windows.json
+factory/customize-windows.json.tmp

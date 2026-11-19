@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_CMD,
   agentRunner,
   ALLOWED_TOOLS,
+  launchCustomizeInTerminal,
   LOOP_IDLE_MS,
   main,
   PATCH_CMD,
@@ -19,6 +20,7 @@ import {
 } from "./loop.ts";
 import { AGENT_RESULT_SCHEMA, type AgentResult } from "./agent-result.ts";
 import type { AuditEntry, AuditStore } from "./audit-log.ts";
+import { customizeWindowsStore, type CustomizeWindow } from "./customize-windows.ts";
 import { attemptsStore, MAX_PR_ATTEMPTS, type AttemptsStore } from "./pr-attempts.ts";
 import type { PrSource, PullRequest } from "./prs.ts";
 import type { Task, TaskStatus } from "./tasks.schema.ts";
@@ -31,6 +33,11 @@ const task = (id: string, status: TaskStatus = "pending", dependencies: string[]
   acceptanceCriteria: ["c"],
   dependencies,
   status,
+});
+
+/** A lock path in a fresh temp dir, so main never touches the real factory/loop.lock. */
+const tempLock = (over: { isAlive?: (pid: number) => boolean } = {}) => ({
+  lock: { path: join(mkdtempSync(join(tmpdir(), "loop-lock-")), "loop.lock"), ...over },
 });
 
 const PROCESSED: AgentResult = { outcome: "processed" };
@@ -344,6 +351,100 @@ describe("runLoop PR routing", () => {
   });
 });
 
+describe("runLoop customize windows", () => {
+  const T = (n: number) => `2026-10-29T1${n}:00:00.000Z`;
+  const pr = (number: number, comments: { body: string; createdAt: string }[]): PullRequest => ({
+    number,
+    url: `https://github.com/acme/widgets/pull/${number}`,
+    repo: "acme/widgets",
+    title: `PR ${number}`,
+    branch: `feat/other-${number}`,
+    createdAt: T(0),
+    isDraft: false,
+    headSha: `sha${number}`,
+    ci: "pass",
+    mergeable: "clean",
+    reviewDecision: "approved", // approved with CI passing: nothing for the loop to run, so it idles
+    labels: [],
+    comments,
+  });
+  const ask = (n: number) => ({ body: "/customize_order change the criteria", createdAt: T(n) });
+  const answer = (n: number) => ({ body: "## Customize order summary\nDone", createdAt: T(n) });
+
+  function setup(comments: { body: string; createdAt: string }[]) {
+    const dir = mkdtempSync(join(tmpdir(), "loop-win-"));
+    const windows = customizeWindowsStore(join(dir, "w.json"));
+    const target = pr(5, comments);
+    const launched: number[] = [];
+    const logs: string[] = [];
+    let next = 100;
+    let failWith: Error | null = null;
+    const source: PrSource = { list: async () => [{ ...target, comments: [...target.comments] }] };
+    const run = (passes: number) =>
+      runLoop(memStore([]).store, async () => res(), (m) => logs.push(m), {
+        ...fakeSleep(passes),
+        prs: source,
+        attempts: NOOP_ATTEMPTS,
+        customizeWindows: windows,
+        launchCustomize: async (p) => {
+          launched.push(p.number);
+          if (failWith) throw failWith;
+          return next++;
+        },
+      });
+    return { windows, target, launched, logs, run, fail: (e: Error) => (failWith = e) };
+  }
+
+  test("opens one window for a pending request and records it; the next pass does not open another", async () => {
+    const s = setup([ask(1)]);
+    await s.run(3);
+    expect(s.launched).toEqual([5]);
+    const rec = s.windows.get(5) as CustomizeWindow;
+    expect(rec.windowId).toBe(100);
+    expect(rec.commentAt).toBe(T(1));
+  });
+
+  test("a newer request opens a new window", async () => {
+    const s = setup([ask(1)]);
+    await s.run(2);
+    s.target.comments.push(ask(2));
+    await s.run(2);
+    expect(s.launched).toEqual([5, 5]);
+    expect(s.windows.get(5)?.commentAt).toBe(T(2));
+  });
+
+  test("an answered request opens nothing", async () => {
+    const s = setup([ask(1), answer(2)]);
+    await s.run(2);
+    expect(s.launched).toEqual([]);
+    expect(s.windows.get(5)).toBeUndefined();
+  });
+
+  test("a failed launch is logged with the command to run, recorded with no window and not retried", async () => {
+    const s = setup([ask(1)]);
+    s.fail(new Error("no Terminal here"));
+    await s.run(3);
+    expect(s.launched).toEqual([5]);
+    expect(s.windows.get(5)?.windowId).toBeNull();
+    expect(s.logs).toContain('could not open a Terminal for /customize_order 5: no Terminal here; run: claude "/customize_order 5"');
+  });
+
+  test("without a store and launcher the loop opens nothing", async () => {
+    const launched: number[] = [];
+    const target = pr(5, [ask(1)]);
+    await runLoop(memStore([]).store, async () => res(), undefined, {
+      ...fakeSleep(2),
+      prs: { list: async () => [target] },
+      attempts: NOOP_ATTEMPTS,
+      launchCustomize: async (p) => {
+        launched.push(p.number);
+        return 1;
+      },
+    });
+    expect(launched).toEqual([]);
+  });
+});
+
 describe("runLoop audit log", () => {
   const ok: Runner = async () => res();
   const openPr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
@@ -526,7 +627,7 @@ describe("runLoop audit log", () => {
     const { store } = memStore([task("A")]);
     const { audit, entries } = fakeAudit();
     const processed = JSON.stringify({ result: "ok", structured_output: { outcome: "processed" } });
-    await main(store, ["sh", "-c", `printf '%s' "$0"`, processed], { ...fakeSleep(), audit });
+    await main(store, ["sh", "-c", `printf '%s' "$0"`, processed], { ...fakeSleep(), audit, ...tempLock() });
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ action: "dev-task", target: "A", outcome: "success" });
   });
@@ -739,28 +840,85 @@ describe("main", () => {
   test("returns 0 and leaves the task in pr when the agent succeeds", async () => {
     const { store, tasks } = memStore([task("A")]);
     const processed = JSON.stringify({ result: "ok", structured_output: { outcome: "processed" } });
-    expect(await main(store, ["sh", "-c", `printf '%s' "$0"`, processed], fakeSleep())).toBe(0);
+    expect(await main(store, ["sh", "-c", `printf '%s' "$0"`, processed], { ...fakeSleep(), ...tempLock() })).toBe(0);
     expect(tasks[0]!.status).toBe("pr");
   });
 
   test("returns 1 and returns the task to pending when the agent fails", async () => {
     const { store, tasks } = memStore([task("A")]);
-    expect(await main(store, ["sh", "-c", "exit 1"], fakeSleep())).toBe(1);
+    expect(await main(store, ["sh", "-c", "exit 1"], { ...fakeSleep(), ...tempLock() })).toBe(1);
     expect(tasks[0]!.status).toBe("pending");
   });
 
   test("returns 0 when aborted while idle", async () => {
     const { store } = memStore([]);
-    expect(await main(store, ["sh", "-c", "exit 0"], fakeSleep(2))).toBe(0);
+    expect(await main(store, ["sh", "-c", "exit 0"], { ...fakeSleep(2), ...tempLock() })).toBe(0);
   });
 
   test("returns 0 on SIGINT while idle", async () => {
     const { store } = memStore([]);
     const never = () => new Promise<void>(() => {});
-    const done = main(store, ["sh", "-c", "exit 0"], { sleep: never });
+    const done = main(store, ["sh", "-c", "exit 0"], { sleep: never, ...tempLock() });
     await Bun.sleep(10);
     process.emit("SIGINT");
     expect(await done).toBe(0);
+  });
+});
+
+describe("main one-loop lock", () => {
+  test("returns 1 and runs no agent when another live loop holds the lock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "loop-lock-"));
+    const path = join(dir, "loop.lock");
+    writeFileSync(path, JSON.stringify({ pid: 4242, startedAt: "2026-10-29T10:00:00.000Z" }));
+    const { store, tasks } = memStore([task("A")]);
+    const ran = join(dir, "ran");
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void errors.push(a.join(" "));
+    let code: number;
+    try {
+      code = await main(store, ["sh", "-c", `echo x > ${ran}`], { ...fakeSleep(), lock: { path, isAlive: (pid) => pid === 4242 } });
+    } finally {
+      console.error = orig;
+    }
+    expect(code).toBe(1);
+    expect(existsSync(ran)).toBe(false);
+    expect(tasks[0]!.status).toBe("pending");
+    expect(errors.join("\n")).toMatch(/a loop is already running \(pid 4242, started \d\d:\d\d local time\)/);
+    expect(JSON.parse(readFileSync(path, "utf8")).pid).toBe(4242);
+  });
+
+  test("replaces a stale lock and removes its own when it stops", async () => {
+    const { lock } = tempLock({ isAlive: () => false });
+    writeFileSync(lock.path, JSON.stringify({ pid: 4242, startedAt: "2026-10-29T10:00:00.000Z" }));
+    const { store } = memStore([]);
+    expect(await main(store, ["sh", "-c", "exit 0"], { ...fakeSleep(2), lock })).toBe(0);
+    expect(existsSync(lock.path)).toBe(false);
+  });
+
+  test("releases the lock on SIGTERM", async () => {
+    const { lock } = tempLock();
+    const { store } = memStore([]);
+    const never = () => new Promise<void>(() => {});
+    const done = main(store, ["sh", "-c", "exit 0"], { sleep: never, lock });
+    await Bun.sleep(10);
+    expect(existsSync(lock.path)).toBe(true);
+    process.emit("SIGTERM");
+    expect(await done).toBe(0);
+    expect(existsSync(lock.path)).toBe(false);
+  });
+});
+
+describe("launchCustomizeInTerminal", () => {
+  test("opens a Terminal window running /customize_order for the PR in the repo", async () => {
+    const scripts: string[] = [];
+    const osa = async (script: string) => {
+      scripts.push(script);
+      return { exitCode: 0, stdout: "17\n", stderr: "" };
+    };
+    expect(await launchCustomizeInTerminal({ number: 7 }, osa)).toBe(17);
+    expect(scripts[0]).toContain("/customize_order 7");
+    expect(scripts[0]).toContain("cd ");
   });
 });
 
