@@ -1,3 +1,5 @@
 node_modules/
 dist/
 .needs-history.jsonl
+.customize-agents.json
+.customize-agents.json.tmp

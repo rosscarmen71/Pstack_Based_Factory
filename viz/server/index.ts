@@ -3,18 +3,20 @@
  * (factory/tasks.json, factory/audit-log.jsonl, GitHub through gh, and Claude Code transcripts),
  * plus the built UI from ./dist.
  *
- * Reads only, with these exceptions: POST /api/takeover/:session and POST /api/customize-terminal/:pr open or
- * focus a Terminal window on this Mac (the second also records its window id in factory/customize-windows.json,
- * which the loop shares), and factory-source.ts keeps viz/.needs-history.jsonl. Nothing else here writes to the
- * factory's files.
+ * Reads only, with these exceptions, the endpoints that act:
+ *   - POST /api/takeover/:session opens a Terminal window on this Mac, resuming a run's conversation.
+ *   - POST /api/customize/:pr/answer and POST /api/customize/:pr/reply talk to the /customize_order agent this
+ *     server hosts for the PR (customize-agent.ts), which the source layer starts for any unanswered request.
+ *     GET /api/customize/:pr only reads its state.
+ * factory-source.ts also keeps viz/.needs-history.jsonl, and the agent manager keeps viz/.customize-agents.json.
+ * Nothing else here writes to the factory's files.
  *
  *   PORT=4600 bun run server/index.ts
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { isRunSession, load, readFeed, REPO_ROOT } from "./factory-source.ts";
-import { customizeWindowsStore } from "../../factory/customize-windows.ts";
-import { focusTerminalWindow, openTerminalWindow, shq } from "../../factory/terminal.ts";
+import { customize, isRunSession, load, readFeed, REPO_ROOT } from "./factory-source.ts";
+import type { AnswerBody, ReplyBody } from "../shared/customize.ts";
 import type { ApiError, EventsPage, HealthResponse } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
@@ -28,6 +30,9 @@ function json(data: unknown, status = 200): Response {
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
 }
+
+/** Single-quotes a value for the shell inside the Terminal command. */
+const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 const notFound = (message: string) => json({ error: message } satisfies ApiError, 404);
 
@@ -75,27 +80,24 @@ async function openTerminal(sessionId: string, fork: boolean): Promise<void> {
   if (code !== 0) throw new Error(`osascript failed (exit ${code}): ${err.trim()}`);
 }
 
-/**
- * Brings the Terminal window where the /customize_order agent for this PR is waiting to the front, or opens a new
- * one running it when that window is gone. The loop writes the window id when it opens the window; this keeps it
- * current when a window is reopened here.
- */
-async function customizeTerminal(pr: number): Promise<"focused" | "opened"> {
-  const store = customizeWindowsStore();
-  const existing = store.get(pr);
-  if (existing?.windowId != null && (await focusTerminalWindow(existing.windowId))) return "focused";
+/** A PR number from the URL, or null when it is not a positive integer. */
+function prParam(req: Request): number | null {
+  const raw = param(req, "pr");
+  const pr = /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN;
+  return Number.isSafeInteger(pr) ? pr : null;
+}
 
-  const windowId = await openTerminalWindow(`cd ${shq(REPO_ROOT)} && ${CLAUDE_BIN} ${shq(`/customize_order ${pr}`)}`);
-  // The request this window answers: the newest unresolved /customize_order dot on the PR, which the model already derives.
-  const { model } = await load();
-  const pending = [...model.details.values()]
-    .flatMap((d) => d.needs)
-    .filter((n) => n.kind === "task_change_requested" && n.resolvedAt === null && n.id.startsWith(`task_change_requested:${pr}:`))
-    .toSorted((a, b) => a.raisedAt.localeCompare(b.raisedAt))
-    .at(-1);
-  const now = new Date().toISOString();
-  store.record({ pr, commentAt: existing?.commentAt ?? pending?.raisedAt ?? now, windowId, openedAt: now });
-  return "opened";
+const badPr = () => json({ error: "pr must be a positive integer" } satisfies ApiError, 400);
+const badBody = (message: string) => json({ error: message } satisfies ApiError, 400);
+const conflict = (message: string) => json({ error: message } satisfies ApiError, 409);
+
+async function bodyOf(req: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body = await req.json();
+    return body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 const server = Bun.serve({
@@ -157,12 +159,33 @@ const server = Bun.serve({
       }),
     },
 
-    "/api/customize-terminal/:pr": {
+    "/api/customize/:pr": safely((req) => {
+      const pr = prParam(req);
+      return pr === null ? badPr() : json(customize.get(pr));
+    }),
+
+    "/api/customize/:pr/answer": {
       POST: safely(async (req) => {
-        const raw = param(req, "pr");
-        const pr = /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN;
-        if (!Number.isSafeInteger(pr)) return json({ error: "pr must be a positive integer" } satisfies ApiError, 400);
-        return json({ ok: true, action: await customizeTerminal(pr) });
+        const pr = prParam(req);
+        if (pr === null) return badPr();
+        const body = await bodyOf(req);
+        const answers = body?.answers as Record<string, unknown> | undefined;
+        if (typeof body?.id !== "string" || !answers || typeof answers !== "object" || !Object.values(answers).every((v) => typeof v === "string")) {
+          return badBody("body must be {id, answers: {question: answer}}");
+        }
+        const ok = customize.answer(pr, { id: body.id, answers: answers as Record<string, string> } satisfies AnswerBody);
+        return ok ? json({ ok: true }) : conflict("no open question with that id");
+      }),
+    },
+
+    "/api/customize/:pr/reply": {
+      POST: safely(async (req) => {
+        const pr = prParam(req);
+        if (pr === null) return badPr();
+        const body = await bodyOf(req);
+        if (typeof body?.text !== "string" || !body.text.trim()) return badBody("body must be {text}");
+        const ok = customize.reply(pr, (body as unknown as ReplyBody).text);
+        return ok ? json({ ok: true }) : conflict("the agent is not waiting for a reply");
       }),
     },
   },
