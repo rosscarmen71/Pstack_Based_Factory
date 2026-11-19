@@ -735,7 +735,8 @@ describe("prRunner", () => {
 describe("main", () => {
   test("returns 0 and leaves the task in pr when the agent succeeds", async () => {
     const { store, tasks } = memStore([task("A")]);
-    expect(await main(store, ["sh", "-c", "exit 0"], fakeSleep())).toBe(0);
+    const processed = JSON.stringify({ result: "ok", structured_output: { outcome: "processed" } });
+    expect(await main(store, ["sh", "-c", `printf '%s' "$0"`, processed], fakeSleep())).toBe(0);
     expect(tasks[0]!.status).toBe("pr");
   });
 
