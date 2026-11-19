@@ -441,6 +441,37 @@ describe("customize_order", () => {
     ]);
   });
 
+  test("the request's dot anchors to the customize_order run once it exists, else to the earlier run", () => {
+    const tasks = [task("a", { status: "pr" })];
+    const cook = transcript({ sessionId: "c0", target: "a", startedAt: at(4), lastAt: at(5) });
+    const prs = [pr({ comments: [comment("/customize_order add X", at(10))] })];
+    const anchorOf = (m: ReturnType<typeof buildModel>) =>
+      m.details.get("order-a")?.needs.find((n) => n.kind === "task_change_requested")?.phaseId;
+    const before = buildModel(snap({ tasks, prs, transcripts: [cook], audit: [audit({ at: at(5) })] }));
+    expect(anchorOf(before)).toBe("run:c0");
+
+    const custom = transcript({ sessionId: "c1", kind: "customize_order", target: "1", startedAt: at(12), lastAt: at(20), mtimeMs: T0 });
+    const after = buildModel(snap({ tasks, prs, transcripts: [cook, custom], audit: [audit({ at: at(5) })] }));
+    expect(anchorOf(after)).toBe("run:c1");
+  });
+
+  test("a customize_order run that started before the comment is not its answer", () => {
+    const tasks = [task("a", { status: "pr" })];
+    const old = transcript({ sessionId: "c1", kind: "customize_order", target: "1", startedAt: at(2), lastAt: at(3), mtimeMs: T0 });
+    const cook = transcript({ sessionId: "c0", target: "a", startedAt: at(4), lastAt: at(5) });
+    const m = buildModel(
+      snap({ tasks, prs: [pr({ comments: [comment("/customize_order again", at(10))] })], transcripts: [old, cook] }),
+    );
+    expect(m.details.get("order-a")?.needs.find((n) => n.kind === "task_change_requested")?.phaseId).toBe("run:c0");
+  });
+
+  test("lane_meta carries the lane's PR number and url for the run panel", () => {
+    const m = buildModel(
+      snap({ tasks: [task("a", { status: "pr" })], transcripts: [transcript({ target: "a" })], prs: [pr({})] }),
+    );
+    expect(m.details.get("order-a")?.lane_meta.a?.pr).toEqual({ number: 1, url: "https://github.com/o/r/pull/1" });
+  });
+
   test("merging or closing the PR resolves a pending request", () => {
     const m = buildModel(
       snap({ tasks: [task("a", { status: "pr" })], prs: [pr({ state: "MERGED", mergedAt: at(40), comments: [comment("/customize_order x", at(10))] })] }),

@@ -3,14 +3,18 @@
  * (factory/tasks.json, factory/audit-log.jsonl, GitHub through gh, and Claude Code transcripts),
  * plus the built UI from ./dist.
  *
- * Reads only, with two exceptions: POST /api/takeover/:session opens a Terminal on this Mac, and
- * factory-source.ts keeps viz/.needs-history.jsonl. Nothing here writes to the factory's files.
+ * Reads only, with these exceptions: POST /api/takeover/:session and POST /api/customize-terminal/:pr open or
+ * focus a Terminal window on this Mac (the second also records its window id in factory/customize-windows.json,
+ * which the loop shares), and factory-source.ts keeps viz/.needs-history.jsonl. Nothing else here writes to the
+ * factory's files.
  *
  *   PORT=4600 bun run server/index.ts
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isRunSession, load, readFeed, REPO_ROOT } from "./factory-source.ts";
+import { customizeWindowsStore } from "../../factory/customize-windows.ts";
+import { focusTerminalWindow, openTerminalWindow, shq } from "../../factory/terminal.ts";
 import type { ApiError, EventsPage, HealthResponse } from "../shared/types.ts";
 
 const PORT = Number(process.env.PORT ?? 4600);
@@ -62,9 +66,6 @@ async function serveStatic(req: Request): Promise<Response> {
   return new Response(Bun.file(join(DIST_DIR, "index.html")), { headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-/** Single-quotes a value for the shell inside the Terminal command. */
-const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
-
 /** Opens macOS Terminal in the repo, resuming the run's conversation (a fork while the run is still live). */
 async function openTerminal(sessionId: string, fork: boolean): Promise<void> {
   const command = `cd ${shq(REPO_ROOT)} && ${CLAUDE_BIN} --resume ${sessionId}${fork ? " --fork-session" : ""}`;
@@ -72,6 +73,29 @@ async function openTerminal(sessionId: string, fork: boolean): Promise<void> {
   const proc = Bun.spawn(["osascript", "-e", script], { stdout: "ignore", stderr: "pipe" });
   const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`osascript failed (exit ${code}): ${err.trim()}`);
+}
+
+/**
+ * Brings the Terminal window where the /customize_order agent for this PR is waiting to the front, or opens a new
+ * one running it when that window is gone. The loop writes the window id when it opens the window; this keeps it
+ * current when a window is reopened here.
+ */
+async function customizeTerminal(pr: number): Promise<"focused" | "opened"> {
+  const store = customizeWindowsStore();
+  const existing = store.get(pr);
+  if (existing?.windowId != null && (await focusTerminalWindow(existing.windowId))) return "focused";
+
+  const windowId = await openTerminalWindow(`cd ${shq(REPO_ROOT)} && ${CLAUDE_BIN} ${shq(`/customize_order ${pr}`)}`);
+  // The request this window answers: the newest unresolved /customize_order dot on the PR, which the model already derives.
+  const { model } = await load();
+  const pending = [...model.details.values()]
+    .flatMap((d) => d.needs)
+    .filter((n) => n.kind === "task_change_requested" && n.resolvedAt === null && n.id.startsWith(`task_change_requested:${pr}:`))
+    .toSorted((a, b) => a.raisedAt.localeCompare(b.raisedAt))
+    .at(-1);
+  const now = new Date().toISOString();
+  store.record({ pr, commentAt: existing?.commentAt ?? pending?.raisedAt ?? now, windowId, openedAt: now });
+  return "opened";
 }
 
 const server = Bun.serve({
@@ -130,6 +154,15 @@ const server = Bun.serve({
         const fork = (await load()).model.liveSessions.has(session);
         await openTerminal(session, fork);
         return json({ ok: true, session, fork });
+      }),
+    },
+
+    "/api/customize-terminal/:pr": {
+      POST: safely(async (req) => {
+        const raw = param(req, "pr");
+        const pr = /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN;
+        if (!Number.isSafeInteger(pr)) return json({ error: "pr must be a positive integer" } satisfies ApiError, 400);
+        return json({ ok: true, action: await customizeTerminal(pr) });
       }),
     },
   },

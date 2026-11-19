@@ -66,6 +66,23 @@ export async function takeOver(uuid: string): Promise<TakeOverResult> {
   return (await res.json()) as TakeOverResult
 }
 
+export interface CustomizeTerminalResult {
+  ok: boolean
+  /** "focused": the agent's existing window came forward. "opened": it was gone, so a new one runs /customize_order. */
+  action: 'focused' | 'opened'
+}
+
+/** Brings the Terminal window where /customize_order is grilling you to the front, or reopens it. */
+export async function openCustomizeTerminal(pr: number): Promise<CustomizeTerminalResult> {
+  const url = `/api/customize-terminal/${pr}`
+  const res = await fetch(url, { method: 'POST' })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(body?.error ?? `POST ${url} → ${res.status}`)
+  }
+  return (await res.json()) as CustomizeTerminalResult
+}
+
 export async function fetchEvents(adwId: string, after: number, limit = 500): Promise<EventsPage> {
   const page = (await getJson(
     `/api/sessions/${encodeURIComponent(adwId)}/events?after=${after}&limit=${limit}`,

@@ -144,13 +144,15 @@ export interface Need {
   phaseId: string | null;
   raisedAt: string;
   resolvedAt: string | null;
-  /** Where clicking the highlighted spot goes: a PR page, or the run's panel. */
+  /** What the need is about: a PR page, or a run. The run panel's buttons use it; clicking a dot only highlights its block. */
   goTo: { kind: "pr"; url: string } | { kind: "run"; phaseId: string };
 }
 
 export interface LaneMeta {
   title: string;
   subtitle: string;
+  /** The lane's pull request, when it has one: the run panel's "Open PR" and Terminal-window buttons need it. */
+  pr?: { number: number; url: string };
 }
 
 export type OrderStatus = "broken" | "running" | "done" | "waiting";
@@ -417,6 +419,9 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
     const anchor = (at: string) =>
       prRuns.filter((r) => Date.parse(r.startedAt) <= Date.parse(at)).at(-1)?.id ?? prRuns.at(-1)?.id ?? null;
     const goTo: Need["goTo"] = { kind: "pr", url: pr.url };
+    // The /customize_order run that answers a request is the first one for this PR that starts at or after the comment.
+    const customizeRunFor = (at: string) =>
+      prRuns.find((r) => r.kind === "customize_order" && Date.parse(r.startedAt) >= Date.parse(at))?.id ?? null;
 
     for (const [i, ev] of (snap.labelEvents[pr.number] ?? []).entries()) {
       if (ev.event !== "labeled" || ev.label !== "needs-human") continue;
@@ -469,10 +474,10 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
         kind: "task_change_requested",
         severity: "review",
         title: "Comment asks to change the task",
-        description: `A comment on PR #${pr.number} asks to change the task. Run /customize_order ${pr.number} yourself; the loop never runs it.`,
+        description: `A comment on PR #${pr.number} asks to change the task. Answer the /customize_order ${pr.number} agent in its Terminal window; open its run for a button that brings that window forward.`,
         sessionId: sessionOfLane(lane),
         lane,
-        phaseId: anchor(q.at),
+        phaseId: customizeRunFor(q.at) ?? anchor(q.at),
         raisedAt: q.at,
         resolvedAt: q.resolvedAt,
         goTo,
@@ -701,6 +706,7 @@ export function buildModel(snap: Snapshot): Model {
       laneMeta[lane] = task
         ? { title: task.id, subtitle: deps.length ? `needs ${depText}` : "no dependencies" }
         : { title: lane, subtitle: pr?.branch ?? "no task matches this branch" };
+      if (pr) laneMeta[lane].pr = { number: pr.number, url: pr.url };
 
       for (const [ri, r] of rs.entries()) {
         const seq = li * 1000 + ri;
