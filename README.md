@@ -115,7 +115,7 @@ Each turn, the loop takes the single oldest candidate across ready tasks and PRs
 **PRs.** `pr-state.ts` decides what each open PR needs. The first matching rule wins:
 
 1. Draft, or labelled `needs-human` → nothing
-2. An unanswered `/customize_order` comment → nothing, until you run `/customize_order <pr>`
+2. An unanswered `/customize_order` comment → nothing, until you answer the visualizer's `/customize_order <pr>` agent
 3. CI failing, merge conflict, changes requested, labelled `changes-requested`, or an unanswered `/remake` comment →
    **patch** (`/remake`)
 4. Approved with CI passing → nothing
@@ -150,9 +150,11 @@ When there's nothing to do, the loop sleeps `LOOP_IDLE_MS` (60 s) and checks aga
 **One loop at a time.** The loop writes its pid to `factory/loop.lock`. A second `bun run loop` exits at once, naming
 the running loop's pid and start time. A lock left by a killed loop is replaced.
 
-**`/customize_order` windows.** When a PR gets a `/customize_order` comment, the loop opens a macOS Terminal window
-running `claude "/customize_order <pr>"` in the repo, once per comment, and records it in
-`factory/customize-windows.json`. Off macOS it logs the command to run instead.
+**`/customize_order` in the visualizer.** The loop only leaves a PR with an unanswered `/customize_order` comment alone. The
+visualizer (`bun run viz`) runs `/customize_order <pr>` itself, once per comment, through the Claude Agent SDK on your
+Claude Code login, and you answer its questions in the PR's run page, as option cards (the recommended option first, or
+type your own) or in the reply box. If the visualizer is stopped, nothing starts until it runs again, and a run it was
+holding resumes where it left off. Its state is kept in `viz/.customize-agents.json`.
 
 ### Agent Permissions
 

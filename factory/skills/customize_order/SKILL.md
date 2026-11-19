@@ -6,9 +6,12 @@ disable-model-invocation: true
 
 # Customize Order
 
-Run by a human, interactively, like `take_order`. The loop never runs it: when a PR comment starts with
+Run with a human, interactively, like `take_order`. The loop never runs it: when a PR comment starts with
 `/customize_order`, the loop leaves that PR alone and the visualizer shows a "Comment asks to change the task" dot
-until this skill posts its summary.
+until this skill posts its summary. The visualizer hosts the run, so the engineer answers in its run page, where each
+question you ask with the `AskUserQuestion` tool is shown as option cards. Ask every question with `AskUserQuestion`
+(2-4 options, your recommended option first, and say so in its description); the engineer can always type their own
+answer. This includes the questions of the grill_me skill and the final approval in step 3.
 
 The input is a PR number. The output is the PR's task updated in `factory/tasks.json`, new commits pushed to the PR's
 branch, and one summary comment that says how the task changed and what happened to each requested change.

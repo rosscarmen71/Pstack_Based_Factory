@@ -6,7 +6,6 @@ import {
   AGENT_CMD,
   agentRunner,
   ALLOWED_TOOLS,
-  launchCustomizeInTerminal,
   LOOP_IDLE_MS,
   main,
   PATCH_CMD,
@@ -20,7 +19,6 @@ import {
 } from "./loop.ts";
 import { AGENT_RESULT_SCHEMA, type AgentResult } from "./agent-result.ts";
 import type { AuditEntry, AuditStore } from "./audit-log.ts";
-import { customizeWindowsStore, type CustomizeWindow } from "./customize-windows.ts";
 import { attemptsStore, MAX_PR_ATTEMPTS, type AttemptsStore } from "./pr-attempts.ts";
 import type { PrSource, PullRequest } from "./prs.ts";
 import type { Task, TaskStatus } from "./tasks.schema.ts";
@@ -348,100 +346,6 @@ describe("runLoop PR routing", () => {
     await runLoop(store, ok, undefined, { ...s, prs: w.source, attempts: w.attempts, runPr });
     // three patch runs, then the limit leaves nothing to do: exactly one sleep
     expect(s.calls).toEqual([LOOP_IDLE_MS]);
-  });
-});
-
-describe("runLoop customize windows", () => {
-  const T = (n: number) => `2026-10-29T1${n}:00:00.000Z`;
-  const pr = (number: number, comments: { body: string; createdAt: string }[]): PullRequest => ({
-    number,
-    url: `https://github.com/acme/widgets/pull/${number}`,
-    repo: "acme/widgets",
-    title: `PR ${number}`,
-    branch: `feat/other-${number}`,
-    createdAt: T(0),
-    isDraft: false,
-    headSha: `sha${number}`,
-    ci: "pass",
-    mergeable: "clean",
-    reviewDecision: "approved", // approved with CI passing: nothing for the loop to run, so it idles
-    labels: [],
-    comments,
-  });
-  const ask = (n: number) => ({ body: "/customize_order change the criteria", createdAt: T(n) });
-  const answer = (n: number) => ({ body: "## Customize order summary\nDone", createdAt: T(n) });
-
-  function setup(comments: { body: string; createdAt: string }[]) {
-    const dir = mkdtempSync(join(tmpdir(), "loop-win-"));
-    const windows = customizeWindowsStore(join(dir, "w.json"));
-    const target = pr(5, comments);
-    const launched: number[] = [];
-    const logs: string[] = [];
-    let next = 100;
-    let failWith: Error | null = null;
-    const source: PrSource = { list: async () => [{ ...target, comments: [...target.comments] }] };
-    const run = (passes: number) =>
-      runLoop(memStore([]).store, async () => res(), (m) => logs.push(m), {
-        ...fakeSleep(passes),
-        prs: source,
-        attempts: NOOP_ATTEMPTS,
-        customizeWindows: windows,
-        launchCustomize: async (p) => {
-          launched.push(p.number);
-          if (failWith) throw failWith;
-          return next++;
-        },
-      });
-    return { windows, target, launched, logs, run, fail: (e: Error) => (failWith = e) };
-  }
-
-  test("opens one window for a pending request and records it; the next pass does not open another", async () => {
-    const s = setup([ask(1)]);
-    await s.run(3);
-    expect(s.launched).toEqual([5]);
-    const rec = s.windows.get(5) as CustomizeWindow;
-    expect(rec.windowId).toBe(100);
-    expect(rec.commentAt).toBe(T(1));
-  });
-
-  test("a newer request opens a new window", async () => {
-    const s = setup([ask(1)]);
-    await s.run(2);
-    s.target.comments.push(ask(2));
-    await s.run(2);
-    expect(s.launched).toEqual([5, 5]);
-    expect(s.windows.get(5)?.commentAt).toBe(T(2));
-  });
-
-  test("an answered request opens nothing", async () => {
-    const s = setup([ask(1), answer(2)]);
-    await s.run(2);
-    expect(s.launched).toEqual([]);
-    expect(s.windows.get(5)).toBeUndefined();
-  });
-
-  test("a failed launch is logged with the command to run, recorded with no window and not retried", async () => {
-    const s = setup([ask(1)]);
-    s.fail(new Error("no Terminal here"));
-    await s.run(3);
-    expect(s.launched).toEqual([5]);
-    expect(s.windows.get(5)?.windowId).toBeNull();
-    expect(s.logs).toContain('could not open a Terminal for /customize_order 5: no Terminal here; run: claude "/customize_order 5"');
-  });
-
-  test("without a store and launcher the loop opens nothing", async () => {
-    const launched: number[] = [];
-    const target = pr(5, [ask(1)]);
-    await runLoop(memStore([]).store, async () => res(), undefined, {
-      ...fakeSleep(2),
-      prs: { list: async () => [target] },
-      attempts: NOOP_ATTEMPTS,
-      launchCustomize: async (p) => {
-        launched.push(p.number);
-        return 1;
-      },
-    });
-    expect(launched).toEqual([]);
   });
 });
 
@@ -906,19 +810,6 @@ describe("main one-loop lock", () => {
     process.emit("SIGTERM");
     expect(await done).toBe(0);
     expect(existsSync(lock.path)).toBe(false);
-  });
-});
-
-describe("launchCustomizeInTerminal", () => {
-  test("opens a Terminal window running /customize_order for the PR in the repo", async () => {
-    const scripts: string[] = [];
-    const osa = async (script: string) => {
-      scripts.push(script);
-      return { exitCode: 0, stdout: "17\n", stderr: "" };
-    };
-    expect(await launchCustomizeInTerminal({ number: 7 }, osa)).toBe(17);
-    expect(scripts[0]).toContain("/customize_order 7");
-    expect(scripts[0]).toContain("cd ");
   });
 });
 

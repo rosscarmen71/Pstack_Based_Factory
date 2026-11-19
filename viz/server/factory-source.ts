@@ -1,12 +1,14 @@
 /**
  * Gathers a Snapshot of the factory from disk and GitHub, then hands it to the pure model.
- * Reads only, with one exception: viz/.needs-history.jsonl, the visualizer's own record of stuck tasks.
+ * Reads only, with two exceptions: viz/.needs-history.jsonl, the visualizer's own record of stuck tasks, and the
+ * /customize_order agents it starts for PRs with an unanswered request (customize-agent.ts).
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { auditStore } from "../../factory/audit-log.ts";
 import { MAX_PR_ATTEMPTS } from "../../factory/pr-attempts.ts";
+import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, pendingRequest } from "../../factory/pr-state.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
 import type { Task } from "../../factory/tasks.schema.ts";
 import {
@@ -18,6 +20,7 @@ import {
   type StuckHistoryEntry,
   type Transcript,
 } from "./factory-model.ts";
+import { CustomizeManager } from "./customize-agent.ts";
 import { parseFeed, parseTranscript, runCommand, type FeedItem } from "./transcripts.ts";
 
 export const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -195,6 +198,34 @@ async function readPrs(now: number): Promise<PrInfo[]> {
   }
 }
 
+// ── /customize_order agents ─────────────────────────────────────────────────
+
+/** Whether the request made at `commentAt` has its summary comment, read fresh from GitHub. */
+async function requestAnswered(pr: number, commentAt: string): Promise<boolean> {
+  const raw = JSON.parse(await gh(["pr", "view", String(pr), "--json", "comments"])) as {
+    comments: { body: string; createdAt: string }[];
+  };
+  const answered = pendingRequest({ comments: raw.comments }, CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING)?.createdAt !== commentAt;
+  if (answered) {
+    // The summary is what resolves the dot: drop the cached PR list so the next poll sees it.
+    prCache = null;
+    last = null;
+  }
+  return answered;
+}
+
+/** The one /customize_order agent host for this server. */
+export const customize = new CustomizeManager({ cwd: REPO_ROOT, isAnswered: requestAnswered });
+
+/** Starts (or resumes) the agent for every open PR whose /customize_order comment is unanswered. */
+function ensureCustomizeAgents(prs: PrInfo[]): void {
+  for (const pr of prs) {
+    if (pr.state !== "OPEN") continue;
+    const request = pendingRequest(pr, CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING);
+    if (request) customize.ensure(pr.number, request.createdAt);
+  }
+}
+
 const labelCache = new Map<number, { at: number; events: LabelEvent[] }>();
 
 /** needs-human history only exists for PRs the loop worked on enough times to be flagged, so only those are asked. */
@@ -302,6 +333,7 @@ async function build(now: number): Promise<Loaded> {
   if (prError) errors.github = prError;
   const runsPerPr = new Map<number, number>();
   for (const a of audit) if (typeof a.target === "number") runsPerPr.set(a.target, (runsPerPr.get(a.target) ?? 0) + 1);
+  ensureCustomizeAgents(prs);
   const snap: Snapshot = {
     tasks,
     audit,
@@ -310,6 +342,7 @@ async function build(now: number): Promise<Loaded> {
     labelEvents: await readLabelEvents(prs, runsPerPr, now),
     stuckHistory: readHistory(),
     loopRunning: running,
+    customize: customize.all(),
     now,
   };
   const model = buildModel(snap);

@@ -12,6 +12,7 @@ import {
   type Snapshot,
   type Transcript,
 } from "./factory-model.ts";
+import type { CustomizeState } from "../shared/customize.ts";
 import { parseFeed, parseTranscript, runCommand } from "./transcripts.ts";
 
 const T0 = Date.parse("2026-11-18T10:00:00Z");
@@ -79,6 +80,7 @@ const snap = (over: Partial<Snapshot>): Snapshot => ({
   labelEvents: {},
   stuckHistory: [],
   loopRunning: false,
+  customize: {},
   now: T0 + 60 * 60_000,
   ...over,
 });
@@ -439,6 +441,38 @@ describe("customize_order", () => {
       [at(10), at(25)],
       [at(30), null],
     ]);
+  });
+
+  test("the request's dot asks a question while the agent waits, awaits a reply when idle, and goes back after", () => {
+    const tasks = [task("a", { status: "pr" })];
+    const prs = [pr({ comments: [comment("/customize_order add X", at(10))] })];
+    const state = (over: Partial<CustomizeState>): Record<number, CustomizeState> => ({
+      1: { pr: 1, status: "waiting", sessionId: "s", pending: null, error: null, ...over },
+    });
+    const need = (customize: Record<number, CustomizeState>, p = prs) =>
+      buildModel(snap({ tasks, prs: p, customize })).details.get("order-a")?.needs.find((n) => n.kind === "task_change_requested");
+    const asking = need(
+      state({
+        pending: {
+          id: "t1",
+          questions: [
+            { question: "Which file?", header: "File", multiSelect: false, options: [{ label: "a", description: "" }] },
+            { question: "Add a test?", header: "Test", multiSelect: false, options: [] },
+          ],
+        },
+      }),
+    );
+    expect(asking?.title).toBe("Agent is asking you a question");
+    expect(asking?.description).toContain("Which file?");
+    expect(asking?.description).toContain("Add a test?");
+    expect(need(state({ status: "idle" }))?.title).toBe("Agent is waiting for your reply");
+    for (const status of ["running", "starting", "failed"] as const) {
+      expect(need(state({ status }))?.title).toBe("Comment asks to change the task");
+    }
+    expect(need({})?.title).toBe("Comment asks to change the task");
+    // Answered request: the resolved dot keeps its plain title whatever the agent says.
+    const answered = [pr({ comments: [comment("/customize_order add X", at(10)), comment("## Customize order summary", at(25))] })];
+    expect(need(state({ status: "idle" }), answered)?.title).toBe("Comment asks to change the task");
   });
 
   test("the request's dot anchors to the customize_order run once it exists, else to the earlier run", () => {

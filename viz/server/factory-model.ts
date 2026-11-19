@@ -25,6 +25,7 @@ import type {
   SessionStatus,
   SessionSummary,
 } from "../shared/types.ts";
+import type { CustomizeState } from "../shared/customize.ts";
 import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, startsWithWord } from "../../factory/pr-state.ts";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
@@ -119,6 +120,8 @@ export interface Snapshot {
   labelEvents: Record<number, LabelEvent[]>;
   stuckHistory: StuckHistoryEntry[];
   loopRunning: boolean;
+  /** The /customize_order agents the visualizer hosts, by PR number. */
+  customize: Record<number, CustomizeState>;
   now: number;
 }
 
@@ -151,7 +154,7 @@ export interface Need {
 export interface LaneMeta {
   title: string;
   subtitle: string;
-  /** The lane's pull request, when it has one: the run panel's "Open PR" and Terminal-window buttons need it. */
+  /** The lane's pull request, when it has one: the run panel's "Open PR" button and customize card need it. */
   pr?: { number: number; url: string };
 }
 
@@ -469,12 +472,25 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
     const newestOpen = requests.findLast((q) => q.resolvedAt === null);
     for (const q of requests) {
       if (q.resolvedAt === null && q !== newestOpen) continue;
+      // Only the open request has a live agent to ask about; a resolved one keeps the plain title.
+      const agent = q === newestOpen ? snap.customize[pr.number] : undefined;
+      const asking = agent?.status === "waiting" ? agent.pending : null;
+      const title = asking
+        ? "Agent is asking you a question"
+        : agent?.status === "idle"
+          ? "Agent is waiting for your reply"
+          : "Comment asks to change the task";
+      const description = asking
+        ? asking.questions.map((x) => x.question).join("\n")
+        : agent?.status === "idle"
+          ? `The /customize_order ${pr.number} agent asked in plain text. Open its run and type your reply under the feed.`
+          : `A comment on PR #${pr.number} asks to change the task. The visualizer runs the /customize_order ${pr.number} agent; open its run to answer its questions.`;
       needs.push({
         id: `task_change_requested:${pr.number}:${q.at}`,
         kind: "task_change_requested",
         severity: "review",
-        title: "Comment asks to change the task",
-        description: `A comment on PR #${pr.number} asks to change the task. Answer the /customize_order ${pr.number} agent in its Terminal window; open its run for a button that brings that window forward.`,
+        title,
+        description,
         sessionId: sessionOfLane(lane),
         lane,
         phaseId: customizeRunFor(q.at) ?? anchor(q.at),
