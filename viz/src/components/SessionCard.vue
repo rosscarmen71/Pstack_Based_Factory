@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import type { EventRow, OrderSummary } from '../lib/types'
-import { fetchEvents } from '../lib/api'
+import { fetchEvents, setSessionProject } from '../lib/api'
 import { fmtDate, ts } from '../lib/format'
 import { agentColor, dotColor, eventLabel } from '../lib/events'
 import { hrefFor } from '../lib/router'
@@ -10,7 +10,73 @@ import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import PhaseDots from './PhaseDots.vue'
 
-const props = defineProps<{ session: OrderSummary; nowMs: number }>()
+const props = defineProps<{ session: OrderSummary; nowMs: number; projects: string[] }>()
+const emit = defineEmits<{ (e: 'project-changed'): void }>()
+
+// Project control. Synthetic sessions (the buckets for unlinked PRs and undated
+// tasks) are not real runs, so they can't be moved.
+const SYNTHETIC_IDS = ['unlinked-prs', 'tasks-without-a-date']
+const movable = computed(() => !SYNTHETIC_IDS.includes(props.session.adw_id))
+const PROJECT_MAX = 60
+const NEW_PROJECT = '__new__'
+const NO_PROJECT = ''
+
+const creating = ref(false)
+const newName = ref('')
+const saving = ref(false)
+const projectError = ref<string | null>(null)
+const nameInput = ref<HTMLInputElement | null>(null)
+
+// The session's own project is always an option, even before the list catches up.
+const options = computed(() => {
+  const cur = props.session.project
+  return cur && !props.projects.includes(cur) ? [...props.projects, cur] : props.projects
+})
+
+async function save(project: string | null) {
+  saving.value = true
+  projectError.value = null
+  try {
+    await setSessionProject(props.session.adw_id, project)
+    creating.value = false
+    newName.value = ''
+    emit('project-changed')
+  } catch (err) {
+    projectError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    saving.value = false
+  }
+}
+
+function onSelect(e: Event) {
+  const el = e.target as HTMLSelectElement
+  const value = el.value
+  if (value === NEW_PROJECT) {
+    // Snap the select back; the text input takes over until saved or cancelled.
+    el.value = props.session.project ?? NO_PROJECT
+    creating.value = true
+    projectError.value = null
+    void nextTick(() => nameInput.value?.focus())
+    return
+  }
+  void save(value === NO_PROJECT ? null : value)
+}
+
+function commitNew() {
+  const name = newName.value.trim()
+  if (!name) return
+  if (name === props.session.project) {
+    creating.value = false
+    return
+  }
+  void save(name)
+}
+
+function cancelNew() {
+  creating.value = false
+  newName.value = ''
+  projectError.value = null
+}
 
 // Each card tails its own event stream: one full fetch on mount, then the
 // same rowid-cursor poll as the trace view — but only while the run is live.
@@ -288,6 +354,45 @@ const hiddenRowCount = computed(() =>
       <StatChip kind="runtime" :value="durationMs" />
       <StatChip kind="tokens" :value="session.total_tokens" />
     </div>
+
+    <!-- The card is a link: every event in the control is kept from reaching it. -->
+    <div
+      v-if="movable"
+      class="project-ctl"
+      @click.prevent.stop
+      @mousedown.stop
+      @keydown.stop
+      @keyup.stop
+    >
+      <span class="project-label dim">project</span>
+      <input
+        v-if="creating"
+        ref="nameInput"
+        v-model="newName"
+        class="project-input"
+        type="text"
+        :maxlength="PROJECT_MAX"
+        placeholder="new project name"
+        :disabled="saving"
+        aria-label="New project name"
+        @keydown.enter.prevent="commitNew"
+        @keydown.esc.prevent="cancelNew"
+      />
+      <select
+        v-else
+        class="project-select"
+        :value="session.project ?? NO_PROJECT"
+        :disabled="saving"
+        aria-label="Project"
+        @change="onSelect"
+      >
+        <option :value="NO_PROJECT">No project</option>
+        <option v-for="name in options" :key="name" :value="name">{{ name }}</option>
+        <option :value="NEW_PROJECT">New project…</option>
+      </select>
+      <span v-if="projectError" class="project-error" :title="projectError">{{ projectError }}</span>
+      <span v-else-if="creating" class="project-hint faint">Enter saves · Esc cancels</span>
+    </div>
   </a>
 </template>
 
@@ -295,8 +400,8 @@ const hiddenRowCount = computed(() =>
 .card {
   /* Uniform size: the grid fixes the width, this fixes the height — content
      clamps and truncates rather than resizing the card. Grew by one 40px row
-     slot when the timeline went from three to four. */
-  height: 420px;
+     slot when the timeline went from three to four, and by a row for the project control. */
+  height: 468px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -541,5 +646,63 @@ const hiddenRowCount = computed(() =>
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.project-ctl {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  cursor: default;
+  font-size: 16px;
+}
+
+.project-label {
+  flex: none;
+}
+
+.project-select,
+.project-input {
+  min-width: 0;
+  flex: 1;
+  max-width: 260px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-3);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.project-input {
+  cursor: text;
+}
+
+.project-select:hover,
+.project-select:focus,
+.project-input:focus {
+  border-color: var(--faint);
+  outline: none;
+}
+
+.project-select:disabled,
+.project-input:disabled {
+  opacity: 0.6;
+}
+
+.project-hint,
+.project-error {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.project-error {
+  color: var(--red);
 }
 </style>

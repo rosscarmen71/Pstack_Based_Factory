@@ -94,6 +94,11 @@ export function replyCustomize(pr: number, body: ReplyBody): Promise<void> {
   return sendJson(`/api/customize/${pr}/reply`, body)
 }
 
+/** Moves a session to a project (a plain name), or out of its project with null. */
+export async function setSessionProject(adwId: string, project: string | null): Promise<void> {
+  await sendJson(`/api/sessions/${encodeURIComponent(adwId)}/project`, { project })
+}
+
 export async function fetchEvents(adwId: string, after: number, limit = 500): Promise<EventsPage> {
   const page = (await getJson(
     `/api/sessions/${encodeURIComponent(adwId)}/events?after=${after}&limit=${limit}`,
