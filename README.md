@@ -75,6 +75,7 @@ bun install
 | --- | --- |
 | `bun run loop` | Start the factory loop (`factory/loop.ts`). Stop it with Ctrl+C. |
 | `bun run queue` | Read-only queue and history view on http://127.0.0.1:4040 |
+| `bun run viz` | The factory visualizer on http://127.0.0.1:4600 (see below). Never starts the loop. |
 | `bun run lint` | Biome lint (no formatter) |
 | `bun run typecheck` | `tsc --noEmit` |
 | `bun test` | The factory's own tests |
@@ -168,6 +169,33 @@ writes anything.
 
 The PR list is cached for about 10 seconds. If `gh` fails, the page still loads with tasks only and an error banner.
 If the audit log can't be read, the history section shows an error and the queue still renders.
+
+## Visualizer
+
+`bun run viz` opens a live view of the factory in your browser. The first run installs and builds the app in `viz/`,
+which is the visualizer from [disler/super-simple-software-factory](https://github.com/disler/super-simple-software-factory)
+(MIT, see `viz/LICENSE`) fed by this factory instead of its own tracer. It reads `factory/tasks.json`,
+`factory/audit-log.jsonl`, GitHub through `gh`, and the Claude Code transcripts of the loop's headless runs. The UI polls
+every half second.
+
+- **Sessions screen.** One card per `/take_order` order (tasks added together), plus an "Unlinked PRs" card for runs on
+  PRs whose branch matches no task. Each card shows broken, running, done or waiting, and "needs you: N".
+- **Waterfall.**
+  - One lane per task. Its `cook`, `taste_test` and `remake` runs are blocks in time order: green worked, red broke
+    (including `failed:` skips), amber skipped. A task that hasn't started shows a dashed "waiting on …" block.
+  - Ticks inside a block are milestone commands (branch, commit, checks, verifier, push, PR, review). Hover one for
+    the command and whether it worked.
+  - The top "You" lane has a dot for everything that needs you: loop stopped, `needs-human`, a stuck
+    `Verdict: CHANGES`, a task PR ready to review, or a task stuck `in_progress`. Resolved dots stay greyed. Click a
+    dot to jump to its block, then click the block to open the PR or the run.
+- **Run panel.** Click a block to see the task, a result checklist (exit code, report, task status, PR, CI), the
+  milestones, token usage and the agent's live feed. **Take over in Claude Code** opens Terminal running
+  `claude --resume` on that run. While the run is still going, that's a forked copy, and typing there doesn't reach
+  the running agent.
+- **Top bar.** Shows whether `bun run loop` is running.
+
+It never writes to the factory's files. Its only writes are `viz/.needs-history.jsonl`, its own record of stuck tasks,
+and the Terminal window that Take over opens. The first Take over makes macOS ask you to allow controlling Terminal.
 
 ## CI
 

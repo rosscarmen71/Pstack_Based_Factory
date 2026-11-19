@@ -5,6 +5,7 @@
   "scripts": {
     "loop": "bun factory/loop.ts",
     "queue": "bun factory/queue-server.ts",
+    "viz": "bun viz/launch.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
     "test": "bun test"

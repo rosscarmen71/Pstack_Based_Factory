@@ -1,0 +1,207 @@
+:root {
+  /* Soft dark theme. scripts/contrast.ts reads this block: keep one token per line. */
+  --bg: #1e2128;
+  --panel: #252830;
+  --panel-2: #2b2f37;
+  --panel-3: #1a1d23;
+  --panel-hover: #32363f;
+  --border: #33363e;
+  --border-soft: #2e3138;
+  --text: #e6e6e3;
+  --dim: #b9bbbe;
+  --faint: #a3a5a8;
+  --green: #8fc49a;
+  --green-line: #6f9f7a;
+  --red: #e3a39d;
+  --red-line: #c98079;
+  --amber: #d7b36a;
+  --amber-line: #c9a65e;
+  --blue: #9db8dc;
+  --blue-line: #7f9fc9;
+  --purple: #b8a9dc;
+  --cyan: #8fb7c4;
+  --violet: #a4aedb;
+  --pink: #dbaac0;
+  color-scheme: dark;
+  /* Play carries the UI voice; mono is reserved for data (ids, times, code). */
+  --sans: 'Play', 'Helvetica Neue', system-ui, sans-serif;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Mono',
+    'Roboto Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  /* Readability floor: nothing in the app renders below 16px. */
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+pre {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* JSON token colors — spans emitted by lib/highlight.ts */
+.j-key {
+  color: var(--purple);
+}
+
+.j-str {
+  color: var(--green);
+}
+
+.j-num {
+  color: var(--amber);
+}
+
+.j-bool {
+  color: var(--cyan);
+}
+
+.j-null {
+  color: var(--red);
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.faint {
+  color: var(--faint);
+}
+
+.error-bar {
+  margin: 12px 24px;
+  padding: 10px 14px;
+  border: 1px solid var(--red-line);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
+  border-radius: 8px;
+  font-size: 16px;
+}
+
+.empty-state {
+  padding: 56px 24px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 16px;
+}
+
+/* Rendered-markdown blocks (compiled prompts) — global because the content is
+   injected via v-html and scoped styles can't reach it. */
+.md {
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.md h1 {
+  font-size: 20px;
+  margin: 14px 0 8px;
+}
+
+.md h2 {
+  font-size: 18px;
+  margin: 14px 0 8px;
+}
+
+.md h3,
+.md h4 {
+  font-size: 17px;
+  margin: 12px 0 6px;
+}
+
+.md h1:first-child,
+.md h2:first-child,
+.md h3:first-child {
+  margin-top: 0;
+}
+
+.md p {
+  margin: 8px 0;
+  white-space: pre-wrap;
+}
+
+.md code {
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 16px;
+}
+
+.md pre.md-code {
+  margin: 10px 0;
+  white-space: pre;
+}
+
+.md pre.md-code code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.md ul,
+.md ol {
+  margin: 8px 0;
+  padding-left: 28px;
+}
+
+.md li {
+  margin: 3px 0;
+}
+
+.md blockquote {
+  margin: 10px 0;
+  padding: 4px 0 4px 14px;
+  border-left: 3px solid var(--border);
+  color: var(--dim);
+  white-space: pre-wrap;
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
