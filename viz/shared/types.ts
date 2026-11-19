@@ -41,6 +41,8 @@ export interface Session {
   total_cost: number | null;
   /** 1 once archived out of the review list. Review state, not run state. */
   archived: number | null;
+  /** Free-form project name the session is grouped under; null = no project. */
+  project: string | null;
 }
 
 /**

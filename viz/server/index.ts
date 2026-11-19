@@ -8,6 +8,8 @@
  *   - POST /api/customize/:pr/answer and POST /api/customize/:pr/reply talk to the /customize_order agent this
  *     server hosts for the PR (customize-agent.ts), which the source layer starts for any unanswered request.
  *     GET /api/customize/:pr only reads its state.
+ *   - POST /api/sessions/:adw_id/project writes the optional `project` field of each task in that order, in
+ *     factory/tasks.json (through the task store, so it never clobbers the loop's own writes).
  * factory-source.ts also keeps viz/.needs-history.jsonl, and the agent manager keeps viz/.customize-agents.json.
  * Nothing else here writes to the factory's files.
  *
@@ -15,7 +17,9 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { customize, isRunSession, load, readFeed, REPO_ROOT } from "./factory-source.ts";
+import { fileStore } from "../../factory/tasks.store.ts";
+import { customize, invalidate, isRunSession, load, readFeed, REPO_ROOT } from "./factory-source.ts";
+import { parseProjectBody, setOrderProject } from "./projects.ts";
 import type { AnswerBody, ReplyBody } from "../shared/customize.ts";
 import type { ApiError, EventsPage, HealthResponse } from "../shared/types.ts";
 
@@ -127,6 +131,19 @@ const server = Bun.serve({
 
     // Their one write (archive) has no meaning here: the factory's records are not the reader's to change.
     "/api/sessions/:adw_id/archive": { POST: () => json({ error: "archiving is disabled" } satisfies ApiError, 405) },
+
+    "/api/sessions/:adw_id/project": {
+      POST: safely(async (req) => {
+        const id = param(req, "adw_id");
+        const input = parseProjectBody(await bodyOf(req));
+        if (!input.ok) return badBody(input.error);
+        const ids = setOrderProject(fileStore(), id, input.project);
+        if (!ids) return notFound(`no session ${id}`);
+        invalidate();
+        const session = (await load()).model.sessions.find((s) => s.adw_id === id);
+        return session ? json(session) : notFound(`no session ${id}`);
+      }),
+    },
 
     "/api/sessions/:adw_id/events": safely(async (req) => {
       const all = (await load()).model.events.get(param(req, "adw_id")) ?? [];
