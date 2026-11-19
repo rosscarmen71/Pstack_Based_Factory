@@ -1,15 +1,78 @@
 # Pstack Based Factory
 
-A small software factory that relies heavily on [pstack skills](https://github.com/cursor/plugins/tree/main/pstack).
-A loop picks up tasks, has Claude Code turn each one into a pull request, and reviews or fixes other open PRs.
+A small software factory that relies heavily on [pstack skills](https://github.com/cursor/plugins/tree/main/pstack). A loop picks up tasks, has Claude Code turn each one into a pull request, and reviews or fixes other open PRs.
 
-> Also uses some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main), such as `grilling`,
-> `grill_me`, `grill-with-docs` and `domain-modeling`.
+> Also uses some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main), such as `grilling`, `grill_me`, `grill-with-docs` and `domain-modeling`.
 
 > The factory layout and loop code are adapted from the
 > [app-vitals how-to-factory repo](https://github.com/app-vitals/how-to-factory/tree/main).
 
-## How it works
+> The factory visuals are adapted from the
+> [disler super-simple-software-factory repo](https://github.com/disler/super-simple-software-factory/tree/example)
+
+### Table of Contents
+* [What Is The **Pstack_Based_Factory**?]()
+* [How To **Setup** The Factory?](#setup)
+* [How To **Use** The Factory?](#usage)
+* [How Dose It Work?](#how-it-works)
+
+> For more info see [`docs`](docs/README.md)
+
+## Setup
+
+1) Clone the repo:
+```shell
+git clone https://github.com/rosscarmen71/Pstack_Based_Factory.git 
+```
+
+2) Sign into github :
+```shell
+gh auth login
+```
+
+3) Setup the factory (this script will install the [needed dependencies](#prerequisites))
+```shell
+bun install
+#TODO: is that it????
+```
+
+### Prerequisites
+
+- [Bun](https://bun.sh)
+- [GitHub CLI](https://cli.github.com), signed in with `gh auth login`. The loop lists, labels and comments on PRs.
+- The Claude Code CLI (`npm install -g @anthropic-ai/claude-code`), on the `PATH` of the shell that runs the loop.
+
+## Usage
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `bun run loop` | Start the factory loop (`factory/loop.ts`). Stop it with Ctrl+C. |
+| `bun run queue` | Read-only queue and history view on http://127.0.0.1:4040 |
+| `bun run viz` | The factory visualizer on http://127.0.0.1:4600 (see below). Never starts the loop. |
+| `bun run lint` | Biome lint (no formatter) |
+| `bun run typecheck` | `tsc --noEmit` |
+| `bun test` | The factory's own tests |
+
+`factory/tasks.json` must exist before the loop or the queue view starts. `take_order` creates it, or you can start
+from `[]`.
+
+## How It Works
+
+**Table of contents:**
+- [General Workflow](#general-workflow)
+- [Skills](#skills)
+- [Tasks](#tasks)
+- [The Loop](#the-loop)
+- [Agent Permissions](#agent-permissions)
+- [Result Report](#result-report)
+- [Audit Log](#audit-log)
+- [Queue View](#queue-view)
+- [Visualizer](#visualizer)
+- [CI](#ci)
+
+## General Workflow
 
 1. **You add tasks.** Run `/take_order` in Claude Code with a short description of what you want built. It designs
    the feature with you (`grill-with-docs`), splits it into tasks (`to_tasks`), and appends them to
@@ -25,82 +88,23 @@ A loop picks up tasks, has Claude Code turn each one into a pull request, and re
 
 Merging is always up to you. The loop never merges.
 
-## Layout
-
-```
-.claude/skills -> ../factory/skills   symlink; how Claude Code finds the skills
-factory/
-  loop.ts            the loop: picks work, runs the agent, tracks status
-  candidates.ts      ranks ready tasks and PRs that need work, oldest first
-  pr-state.ts        decides whether a PR needs review, patch or nothing
-  prs.ts             lists open PRs through `gh pr list`
-  pr-attempts.ts     counts review/patch attempts per PR, flags stuck PRs
-  agent-result.ts    the result report schema and its parser
-  audit-log.ts       append-only log of every agent run
-  tasks.schema.ts    the task shape and its validation
-  tasks.store.ts     reads and writes factory/tasks.json
-  queue-server.ts    the read-only queue and history web view
-  queue-view.ts, history-view.ts, pr-link.ts   HTML rendering for the view
-  *.test.ts          tests, next to the file they test
-  skills.test.ts     checks that cook, taste_test and remake keep the result contract
-  skills/            every skill (see below)
-  tasks.json         the task queue
-  audit-log.jsonl    run history (gitignored, created on first run)
-  pr-attempts.json   attempt counts (gitignored, created on first run)
-```
-
 ### Skills
 
 - **Run by the loop:** `cook` (task → PR), `taste_test` (review a PR), `remake` (fix a PR).
 - **Run by you:** `take_order` (add tasks).
-- **Used inside those:** `cook_poteto` does the actual coding, review and fixing. `to_tasks`, `grill-with-docs`,
-  `interrogate` and the `principle-*` skills are read along the way. The rest of `factory/skills/` are general pstack
-  and Matt Pocock skills you can also run yourself.
+- **Used inside those:** `cook_poteto` does the actual coding, review and fixing. `to_tasks`, `grill-with-docs`, `interrogate` and the `principle-*` skills are read along the way. The rest of `factory/skills/` are general pstack and Matt Pocock skills you can also run yourself.
 
-## Prerequisites
+### Tasks
 
-- [Bun](https://bun.sh)
-- [GitHub CLI](https://cli.github.com), signed in with `gh auth login`. The loop lists, labels and comments on PRs.
-- The Claude Code CLI (`npm install -g @anthropic-ai/claude-code`), on the `PATH` of the shell that runs the loop.
+Each task in `factory/tasks.json` has an `id`, `title`, `description`, `acceptanceCriteria`, `dependencies` (other task ids) and a `status`. `take_order` also stamps `createdAt`. The loop owns `status` and moves it `pending` → `in_progress` → `pr`, where `pr` means the task's PR is open and is final. The loop also records `runs`, `skips`, `lastSkipReason` and the task's `pr` (repo, number, url, open).
 
-Then install dependencies:
+A task is ready when it is `pending` and every dependency has reached `pr`. The PR doesn't have to be merged. `cook` branches from its dependencies' branches when it has any.
 
-```bash
-bun install
-```
+Tests are not mandatory for the features the factory builds. `cook` proves each acceptance criterion with one of three proof types: a `test`, a `live` check or a `manual` check. The factory's own code is tested, and those tests run in CI.
 
-## Commands
+### The Loop
 
-| Command | What it does |
-| --- | --- |
-| `bun run loop` | Start the factory loop (`factory/loop.ts`). Stop it with Ctrl+C. |
-| `bun run queue` | Read-only queue and history view on http://127.0.0.1:4040 |
-| `bun run viz` | The factory visualizer on http://127.0.0.1:4600 (see below). Never starts the loop. |
-| `bun run lint` | Biome lint (no formatter) |
-| `bun run typecheck` | `tsc --noEmit` |
-| `bun test` | The factory's own tests |
-
-`factory/tasks.json` must exist before the loop or the queue view starts. `take_order` creates it, or you can start
-from `[]`.
-
-## Tasks
-
-Each task in `factory/tasks.json` has an `id`, `title`, `description`, `acceptanceCriteria`, `dependencies` (other
-task ids) and a `status`. `take_order` also stamps `createdAt`. The loop owns `status` and moves it
-`pending` → `in_progress` → `pr`, where `pr` means the task's PR is open and is final. The loop also records `runs`,
-`skips`, `lastSkipReason` and the task's `pr` (repo, number, url, open).
-
-A task is ready when it is `pending` and every dependency has reached `pr`. The PR doesn't have to be merged.
-`cook` branches from its dependencies' branches when it has any.
-
-Tests are not mandatory for the features the factory builds. `cook` proves each acceptance criterion with one of
-three proof types: a `test`, a `live` check or a `manual` check. The factory's own code is tested, and those tests run
-in CI.
-
-## The loop
-
-Each turn, the loop takes the single oldest candidate across ready tasks and PRs that need work, by `createdAt`.
-Tasks without `createdAt` go last.
+Each turn, the loop takes the single oldest candidate across ready tasks and PRs that need work, by `createdAt`. Tasks without `createdAt` go last.
 
 **Tasks.** The loop sets the task to `in_progress` and runs `/cook <id>`.
 
@@ -127,13 +131,13 @@ Tasks without `createdAt` go last.
 
 When there's nothing to do, the loop sleeps `LOOP_IDLE_MS` (60 s) and checks again.
 
-### Agent permissions
+### Agent Permissions
 
 Each run gets `--allowedTools` from `ALLOWED_TOOLS` in `factory/loop.ts`: `Read`, `Edit`, `Write`, `Glob`, `Grep`,
 `Agent` (for the independent verifier subagent), and Bash limited to `git`, `gh`, `bun`, `jq`, `ls`, `cat`, `head`,
 `tail`, `wc`, `sed -n` and `echo`.
 
-### Result report
+### Result Report
 
 Every run uses `--output-format json --json-schema <AGENT_RESULT_SCHEMA>` (`factory/agent-result.ts`). The agent ends
 with `{ "outcome": "processed" }` or `{ "outcome": "skipped", "reason": "…" }`. The loop parses that from stdout and
@@ -146,7 +150,7 @@ prints the agent's result text, so you can follow the run.
 - The schema has no top-level `anyOf`/`oneOf`/`allOf`, because the Claude API rejects those in a tool schema. The
   "reason when skipped" rule is enforced in code instead.
 
-## Audit log
+### Audit Log
 
 Every agent run is appended as one JSON line to `factory/audit-log.jsonl`. Each line holds the action, target
 (task id or PR number), title, outcome (`success`, `failure` or `skip`), exit code and duration. PR runs also record
@@ -156,7 +160,7 @@ the repo and URL. `failure` and `skip` entries carry a `reason`. The action labe
 The log only records agent runs. Runners that crash, attempt limits, flagging failures and idle polls go to the
 console only. A failed write to the log is reported but never stops the loop.
 
-## Queue view
+### Queue View
 
 `bun run queue` starts a separate, read-only process bound to `127.0.0.1` on `QUEUE_PORT` (default `4040`). It never
 writes anything.
@@ -170,10 +174,9 @@ writes anything.
 The PR list is cached for about 10 seconds. If `gh` fails, the page still loads with tasks only and an error banner.
 If the audit log can't be read, the history section shows an error and the queue still renders.
 
-## Visualizer
+### Visualizer
 
-`bun run viz` opens a live view of the factory in your browser. The first run installs and builds the app in `viz/`,
-which is the visualizer from [disler/super-simple-software-factory](https://github.com/disler/super-simple-software-factory)
+`bun run viz` opens a live view of the factory in your browser. The first run installs and builds the app in `viz/`, which is an adapted version of the visualizer from [disler/super-simple-software-factory](https://github.com/disler/super-simple-software-factory)
 (MIT, see `viz/LICENSE`) fed by this factory instead of its own tracer. It reads `factory/tasks.json`,
 `factory/audit-log.jsonl`, GitHub through `gh`, and the Claude Code transcripts of the loop's headless runs. The UI polls
 every half second.
@@ -197,7 +200,7 @@ every half second.
 It never writes to the factory's files. Its only writes are `viz/.needs-history.jsonl`, its own record of stuck tasks,
 and the Terminal window that Take over opens. The first Take over makes macOS ask you to allow controlling Terminal.
 
-## CI
+### CI
 
 GitHub Actions run on every PR, and on pushes to `main` for CI and secret-scan:
 
