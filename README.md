@@ -10,6 +10,12 @@ A small software factory that relies heavily on [pstack skills](https://github.c
 > The factory visuals are adapted from the
 > [disler super-simple-software-factory repo](https://github.com/disler/super-simple-software-factory/tree/example)
 
+<img src="imag/PBSF_1.png" alt="random env random agent" width="800"/>
+
+<img src="imag/PBSF_7.png" alt="random env random agent" width="800"/>
+
+<img src="imag/PBSF_2.png" alt="random env random agent" width="400"/>
+
 ### Table of Contents
 * [What Is The **Pstack_Based_Factory**?](#what-is-the-pstack_based_factory)
 * [How To **Setup** The Factory?](#setup)
