@@ -11,30 +11,57 @@ A small software factory that relies heavily on [pstack skills](https://github.c
 > [disler super-simple-software-factory repo](https://github.com/disler/super-simple-software-factory/tree/example)
 
 ### Table of Contents
-* [What Is The **Pstack_Based_Factory**?]()
+* [What Is The **Pstack_Based_Factory**?](#what-is-the-pstack_based_factory)
 * [How To **Setup** The Factory?](#setup)
 * [How To **Use** The Factory?](#usage)
-* [How Dose It Work?](#how-it-works)
+* [How Does It Work?](#how-it-works)
 
 > For more info see [`docs`](docs/README.md)
 
+## What Is The Pstack_Based_Factory?
+
+A loop that turns tasks into pull requests. You add tasks with `/take_order`; the loop picks the oldest ready one,
+runs `/cook` to branch, implement and verify it, and opens a PR. It also reviews and fixes other open PRs with
+`/taste_test` and `/remake`. The work is done by pstack-style skills in `factory/skills/`, run through the Claude Code
+CLI. Merging is always yours; the loop never merges. Watch it with the read-only queue view (`bun run queue`) or the
+live visualizer (`bun run viz`).
+
 ## Setup
 
-1) Clone the repo:
+1) Clone the repo and enter it:
 ```shell
-git clone https://github.com/rosscarmen71/Pstack_Based_Factory.git 
+git clone https://github.com/rosscarmen71/Pstack_Based_Factory.git
+cd Pstack_Based_Factory
 ```
 
-2) Sign into github :
+2) Install the [prerequisites](#prerequisites) below. You need Bun and the Claude Code CLI on your `PATH`, then sign
+   the GitHub CLI in:
 ```shell
 gh auth login
 ```
 
-3) Setup the factory (this script will install the [needed dependencies](#prerequisites))
+3) Install the project's dependencies:
 ```shell
 bun install
-#TODO: is that it????
 ```
+
+4) Give the loop something to do. Run `/take_order` in Claude Code to design a feature and append its tasks, or start
+   from an empty queue:
+```shell
+echo '[]' > factory/tasks.json
+```
+
+5) Start the loop:
+```shell
+bun run loop
+```
+
+6) In another terminal, open the visualizer to watch it work:
+```shell
+bun run viz
+```
+
+Stop the loop with Ctrl+C.
 
 ### Prerequisites
 
@@ -96,7 +123,7 @@ Merging is always up to you. The loop never merges.
 
 ### Tasks
 
-Each task in `factory/tasks.json` has an `id`, `title`, `description`, `acceptanceCriteria`, `dependencies` (other task ids) and a `status`. `take_order` also stamps `createdAt`. The loop owns `status` and moves it `pending` → `in_progress` → `pr`, where `pr` means the task's PR is open and is final. The loop also records `runs`, `skips`, `lastSkipReason` and the task's `pr` (repo, number, url, open).
+Each task in `factory/tasks.json` has an `id`, `title`, `description`, `acceptanceCriteria`, `dependencies` (other task ids) and a `status`. `take_order` also stamps `createdAt` and a `project`: the name of the order the task belongs to, which groups orders in the visualizer (see below). `take_order` asks you for it when you add the order, and you can change it later from the visualizer. The loop owns `status` and moves it `pending` → `in_progress` → `pr`, where `pr` means the task's PR is open and is final. The loop also records `runs`, `skips`, `lastSkipReason` and the task's `pr` (repo, number, url, open).
 
 A task is ready when it is `pending` and every dependency has reached `pr`. The PR doesn't have to be merged. `cook` branches from its dependencies' branches when it has any.
 
@@ -207,7 +234,10 @@ If the audit log can't be read, the history section shows an error and the queue
 every half second.
 
 - **Sessions screen.** One card per `/take_order` order (tasks added together), plus an "Unlinked PRs" card for runs on
-  PRs whose branch matches no task. Each card shows broken, running, done or waiting, and "needs you: N".
+  PRs whose branch matches no task. Each card shows broken, running, done or waiting, and "needs you: N". Cards are
+  grouped into sections by `project`, the most recently started project first and "No project" last. Each card has a
+  select to move its order to another project (or out of one); the choice is written to the `project` field of every
+  task in that order.
 - **Waterfall.**
   - One lane per task. Its `cook`, `taste_test`, `remake` and `customize_order` runs are blocks in time order: green worked, red broke
     (including `failed:` skips), amber skipped. A task that hasn't started shows a dashed "waiting on …" block.
@@ -230,7 +260,8 @@ and the Terminal window that Take over opens. The first Take over makes macOS as
 
 GitHub Actions run on every PR, and on pushes to `main` for CI and secret-scan:
 
-- **CI** (`ci.yml`): `bun install --frozen-lockfile`, lint, typecheck, `bun test`.
+- **CI** (`ci.yml`): `bun install --frozen-lockfile`, the same again in `viz/` (`bun test` also runs `viz/server`'s
+  tests), lint, typecheck, `bun test`.
 - **pr-title-lint**: PR titles must be Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, …).
   `cook` titles its PRs `<type>: <task title>`.
 - **secret-scan**: gitleaks over the commit range.
