@@ -329,7 +329,9 @@ async function applyFocus() {
 }
 
 // After the phase watcher above, so a newly selected phase has its sections reset before focus opens one.
-watch(() => [props.phase.phase_id, props.focusSeq], () => void applyFocus(), { immediate: true })
+// Two sources, not one getter returning [id, seq]: a fresh array counts as a change on every poll, which kept
+// scrolling the engineer back to the button.
+watch([() => props.phase.phase_id, () => props.focusSeq], () => void applyFocus(), { immediate: true })
 
 const typeClass: Record<string, string> = {
   gate_fail: 't-red',
