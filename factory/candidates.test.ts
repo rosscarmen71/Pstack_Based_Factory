@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pickCandidate, rankCandidates } from "./candidates";
-import { type AttemptsStore, MAX_PR_ATTEMPTS, type PrAttempts } from "./pr-attempts";
+import { type AttemptsStore, attemptsStore, MAX_PR_ATTEMPTS, type PrAttempts } from "./pr-attempts";
 import type { PullRequest } from "./prs";
 import type { Task } from "./tasks.schema";
 
@@ -28,6 +31,7 @@ const pr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
   mergeable: "clean",
   reviewDecision: "none",
   labels: [],
+  comments: [],
   ...over,
 });
 
@@ -154,5 +158,35 @@ describe("rankCandidates", () => {
   test("pickCandidate's candidate is the first ranked candidate", () => {
     const attempts = fakeAttempts();
     expect(pickCandidate(tasks, prs, attempts).candidate).toEqual(rankCandidates(tasks, prs, attempts)[0] ?? null);
+  });
+});
+describe("comment requests", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "candidates-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const asked = (...comments: { body: string; createdAt: string }[]) => pr(1, { comments });
+
+  test("a new /remake makes an exhausted PR a candidate again, and an old one does not", () => {
+    const attempts = attemptsStore(join(dir, "pr-attempts.json"));
+    for (let i = 0; i < MAX_PR_ATTEMPTS; i++) attempts.record(1, "patch", "sha");
+    const stuck = asked({ body: "## Remake summary", createdAt: "2026-10-30T09:00:00Z" });
+    attempts.sync([stuck]);
+    expect(pickCandidate([], [stuck], attempts).candidate).toBeNull();
+
+    const remade = asked({ body: "/remake", createdAt: "2026-10-30T10:00:00Z" });
+    attempts.sync([remade]);
+    expect(pickCandidate([], [remade], attempts).candidate).toEqual({ kind: "pr", pr: remade, action: "patch" });
+
+    for (let i = 0; i < MAX_PR_ATTEMPTS; i++) attempts.record(1, "patch", "sha");
+    attempts.sync([remade]);
+    expect(pickCandidate([], [remade], attempts).candidate).toBeNull();
+  });
+
+  test("a pending /customize_order keeps the PR out, even with failed CI", () => {
+    const blocked = pr(1, { ci: "fail", comments: [{ body: "/customize_order", createdAt: "2026-10-30T10:00:00Z" }] });
+    expect(pickCandidate([], [blocked], fakeAttempts())).toEqual({ candidate: null, newlyExceeded: [] });
   });
 });

@@ -19,6 +19,13 @@ export interface PullRequest {
   mergeable: Mergeable;
   reviewDecision: ReviewDecision;
   labels: string[];
+  /** Issue comments on the PR, oldest first as gh returns them. */
+  comments: PrComment[];
+}
+
+export interface PrComment {
+  body: string;
+  createdAt: string;
 }
 
 export interface PrSource {
@@ -35,7 +42,7 @@ export interface GhResult {
 export type GhRunner = (args: string[]) => Promise<GhResult>;
 
 export const PR_JSON_FIELDS =
-  "number,url,title,headRefName,createdAt,isDraft,headRefOid,statusCheckRollup,mergeable,reviewDecision,labels";
+  "number,url,title,headRefName,createdAt,isDraft,headRefOid,statusCheckRollup,mergeable,reviewDecision,labels,comments";
 
 export const bunGh: GhRunner = async (args) => {
   const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -94,6 +101,10 @@ function normalizePr(raw: unknown, index: number): PullRequest {
     return r[k] as string;
   };
   const labels = Array.isArray(r.labels) ? (r.labels as { name?: unknown }[]) : [];
+  const rawComments = Array.isArray(r.comments) ? (r.comments as { body?: unknown; createdAt?: unknown }[]) : [];
+  const comments = rawComments.flatMap((c) =>
+    typeof c?.body === "string" && typeof c.createdAt === "string" ? [{ body: c.body, createdAt: c.createdAt }] : [],
+  );
   const title = str("title");
   const repo = repoFromUrl(r.url);
   if (repo === null) {
@@ -112,6 +123,7 @@ function normalizePr(raw: unknown, index: number): PullRequest {
     mergeable: normalizeMergeable(r.mergeable),
     reviewDecision: normalizeReview(r.reviewDecision),
     labels: labels.map((l) => l.name).filter((n): n is string => typeof n === "string"),
+    comments,
   };
 }
 

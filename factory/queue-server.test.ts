@@ -29,6 +29,7 @@ const pr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
   mergeable: "clean",
   reviewDecision: "none",
   labels: [],
+  comments: [],
   ...over,
 });
 

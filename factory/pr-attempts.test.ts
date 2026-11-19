@@ -37,6 +37,7 @@ function pr(number: number, labels: string[] = []): PullRequest {
     mergeable: "clean",
     reviewDecision: "none",
     labels,
+    comments: [],
   };
 }
 
@@ -153,5 +154,59 @@ describe("sync", () => {
     const { gh, calls } = fakeGh();
     await s.flagForHuman(3, gh);
     expect(calls.length).toBeGreaterThan(0);
+  });
+});
+describe("sync with comment requests", () => {
+  const T1 = "2026-10-30T10:00:00Z";
+  const T2 = "2026-10-30T11:00:00Z";
+  const withComments = (n: number, ...comments: { body: string; createdAt: string }[]): PullRequest => ({ ...pr(n), comments });
+
+  const exhaust = (s: ReturnType<typeof attemptsStore>, n: number) => {
+    for (let i = 0; i < MAX_PR_ATTEMPTS; i++) s.record(n, "patch", "a");
+  };
+
+  test("a new /remake zeroes the counts and keeps reviewedSha; an old one does not reset twice", () => {
+    const s = attemptsStore(path);
+    s.record(5, "review", "sha-1");
+    exhaust(s, 5);
+    expect(s.exceeded(5)).toBe(true);
+    const asked = withComments(5, { body: "/remake", createdAt: T1 });
+    s.sync([asked]);
+    expect(s.exceeded(5)).toBe(false);
+    expect(s.get(5)).toMatchObject({ reviews: 0, patches: 0, reviewedSha: "sha-1", requestAt: T1 });
+    exhaust(s, 5);
+    s.sync([asked]);
+    expect(s.exceeded(5)).toBe(true);
+  });
+
+  test("a newer /remake resets again", () => {
+    const s = attemptsStore(path);
+    s.sync([withComments(5, { body: "/remake", createdAt: T1 })]);
+    exhaust(s, 5);
+    s.sync([withComments(5, { body: "/remake", createdAt: T1 }, { body: "/remake more", createdAt: T2 })]);
+    expect(s.exceeded(5)).toBe(false);
+  });
+
+  test("a customize order summary resets the counts", () => {
+    const s = attemptsStore(path);
+    exhaust(s, 6);
+    s.sync([withComments(6, { body: "/customize_order x", createdAt: T1 }, { body: "## Customize order summary", createdAt: T2 })]);
+    expect(s.get(6)).toMatchObject({ reviews: 0, patches: 0, requestAt: T2 });
+  });
+
+  test("an existing /remake on a PR with no entry is remembered, so later attempts are not wiped", () => {
+    const s = attemptsStore(path);
+    const asked = withComments(7, { body: "/remake", createdAt: T1 });
+    s.sync([asked]);
+    s.record(7, "patch", "a");
+    s.sync([asked]);
+    expect(s.get(7)?.patches).toBe(1);
+  });
+
+  test("factory comments do not reset", () => {
+    const s = attemptsStore(path);
+    exhaust(s, 8);
+    s.sync([withComments(8, { body: "Verdict: CHANGES", createdAt: T1 }, { body: "## Remake summary", createdAt: T2 })]);
+    expect(s.exceeded(8)).toBe(true);
   });
 });

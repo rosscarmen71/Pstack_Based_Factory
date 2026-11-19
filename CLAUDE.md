@@ -7,10 +7,11 @@ from app-vitals/how-to-factory. TypeScript on Bun, strict mode.
 
 - `factory/`: the loop (`loop.ts`), queue view (`queue-server.ts`), supporting modules, and their tests next to them
   (`*.test.ts`).
-- `factory/tasks.json`: the task queue. `take_order` appends to it; the loop moves `status`. Skills never edit it.
+- `factory/tasks.json`: the task queue. `take_order` appends to it; `customize_order` edits one task's text after the
+  engineer approves; the loop moves `status`. No other skill edits it.
 - `factory/audit-log.jsonl`, `factory/pr-attempts.json`: runtime state, gitignored.
 - `factory/skills/`: all skills, found by Claude Code through the `.claude/skills` symlink. The loop runs `/cook {id}`,
-  `/taste_test {pr}` and `/remake {pr}`; `/take_order` is run by a human.
+  `/taste_test {pr}` and `/remake {pr}`; `/take_order` and `/customize_order {pr}` are run by a human.
 
 ## Commands
 

@@ -22,12 +22,16 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
      command and a short log excerpt.
    - Merge conflicts: `mergeable` from `gh pr view <pr> --json mergeable,baseRefName`.
    - Review items: the latest review that requests changes, or taste_test's `Verdict: CHANGES` comment; unresolved
-     review threads; and other PR comments that ask for a change (`gh pr view <pr> --comments`). Skip items an earlier
-     remake summary comment marked fixed or declined, unless someone replied after it.
+     review threads; every comment that starts with `/remake` and was posted after the last `## Remake summary`
+     comment (each one is an engineer's change request); and other PR comments that ask for a change
+     (`gh pr view <pr> --comments`). Skip items an earlier remake summary comment marked fixed or declined, unless
+     someone replied after it.
    - The task, if the head branch is `<type>/<task-id>` and that id exists in `factory/tasks.json`.
 
    If nothing is wrong, remove the `changes-requested` label if the PR has it
    (`gh pr edit <pr> --remove-label changes-requested`), then end the run as `skipped`; there is nothing to push.
+   If a `/remake` request was pending, first post the step 6 summary comment saying why nothing changed, so the
+   request counts as answered and the loop does not run remake on it again.
 3. **Merge the base.** If the PR conflicts, run `git fetch origin`, then `git merge origin/<base>`. Leave the
    conflicted files as they are for cook_poteto; do not resolve them yourself. Never rebase. If the merge completes
    cleanly, it commits itself; that is expected.
@@ -77,7 +81,8 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
      weakening), then rerun this step with a new subagent. At most 2 rounds. After that, push nothing and end the run
      as `skipped` with `failed:` and what still fails.
 6. **Push and report.** Push to the same branch with a plain `git push`. Then write one summary comment to a file
-   outside the repo with the Write tool and post it once with `gh pr comment <pr> --body-file <file>`. It lists each
+   outside the repo with the Write tool and post it once with `gh pr comment <pr> --body-file <file>`. It must start
+   with the line `## Remake summary`, so the loop knows every `/remake` request before it was answered. It lists each
    item from the fix report as fixed (with the commit), declined (with the disproof) or escalated (with why), then
    the checks you ran and their results. Then remove the label that sent the PR here:
    `gh pr edit <pr> --remove-label changes-requested` (skip it if the PR does not have the label). The pushed commit

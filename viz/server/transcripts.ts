@@ -4,7 +4,7 @@
  */
 import { milestoneFor, type Milestone, type RunKind, type Tokens, type Transcript } from "./factory-model.ts";
 
-const COMMAND = /<command-name>\/(cook|taste_test|remake)<\/command-name>[\s\S]*?<command-args>([^<]*)<\/command-args>/;
+const COMMAND = /<command-name>\/(cook|taste_test|remake|customize_order)<\/command-name>[\s\S]*?<command-args>([^<]*)<\/command-args>/;
 
 interface Line {
   type?: string;
@@ -73,7 +73,7 @@ function resultText(content: unknown): string {
     .join("\n");
 }
 
-/** Parses one factory run's transcript; null when the file is not a /cook, /taste_test or /remake run. */
+/** Parses one factory run's transcript; null when the file is not a /cook, /taste_test, /remake or /customize_order run. */
 export function parseTranscript(text: string, sessionId: string, mtimeMs: number): Transcript | null {
   const lines = parseLines(text);
   const prompt = firstPrompt(lines);

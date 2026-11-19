@@ -2,6 +2,7 @@
 // Re-reads before every operation and writes atomically, like tasks.store.ts.
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { CUSTOMIZE_SUMMARY_HEADING, REMAKE_COMMAND, startsWithWord } from "./pr-state.ts";
 import { bunGh, type GhRunner, type PullRequest } from "./prs.ts";
 
 export const PR_ATTEMPTS_PATH = new URL("./pr-attempts.json", import.meta.url).pathname;
@@ -16,6 +17,8 @@ export interface PrAttempts {
   reviewedSha?: string;
   /** Set once flagForHuman has labelled and commented; cleared with the entry when the label is removed. */
   flagged?: boolean;
+  /** createdAt of the newest `/remake` or `## Customize order summary` comment seen; a newer one resets the counts. */
+  requestAt?: string;
 }
 
 export interface AttemptsStore {
@@ -25,7 +28,7 @@ export interface AttemptsStore {
   exceeded(pr: number): boolean;
   /** Adds the `needs-human` label and one comment, only if this PR has not been flagged already. */
   flagForHuman(pr: number, gh?: GhRunner): Promise<void>;
-  /** Prunes entries for PRs no longer open, and resets a flagged PR whose label was removed. */
+  /** Prunes entries for PRs no longer open, resets a flagged PR whose label was removed, and zeroes the counts of a PR with a new `/remake` or customize-order answer. */
   sync(openPrs: PullRequest[]): void;
 }
 
@@ -54,6 +57,16 @@ function writeEntries(path: string, entries: Entries): void {
 async function ghOrThrow(gh: GhRunner, args: string[]): Promise<void> {
   const { exitCode, stderr } = await gh(args);
   if (exitCode !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (exit ${exitCode}): ${stderr.trim() || "no output"}`);
+}
+
+/** createdAt of the newest `/remake` or `## Customize order summary` comment, which is what re-opens a PR's attempts. */
+function requestTime(pr: PullRequest): string | undefined {
+  let best: string | undefined;
+  for (const c of pr.comments) {
+    const counts = startsWithWord(c.body, REMAKE_COMMAND) || c.body.trimStart().startsWith(CUSTOMIZE_SUMMARY_HEADING);
+    if (counts && (best === undefined || Date.parse(c.createdAt) > Date.parse(best))) best = c.createdAt;
+  }
+  return best;
 }
 
 export function attemptsStore(path: string = PR_ATTEMPTS_PATH): AttemptsStore {
@@ -106,6 +119,14 @@ export function attemptsStore(path: string = PR_ATTEMPTS_PATH): AttemptsStore {
           delete entries[k];
           changed = true;
         }
+      }
+      for (const p of openPrs) {
+        const at = requestTime(p);
+        if (at === undefined) continue;
+        const entry = entries[key(p.number)] ?? { reviews: 0, patches: 0 };
+        if (entry.requestAt !== undefined && Date.parse(at) <= Date.parse(entry.requestAt)) continue;
+        entries[key(p.number)] = { ...entry, reviews: 0, patches: 0, requestAt: at };
+        changed = true;
       }
       if (changed) writeEntries(path, entries);
     },
