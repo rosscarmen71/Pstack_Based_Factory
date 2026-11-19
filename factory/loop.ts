@@ -108,7 +108,8 @@ async function idleWait(sleep: (ms: number) => Promise<unknown>, ms: number, sig
 }
 
 /**
- * One task at a time. Exit 0 means a PR was opened; anything else returns the task to pending and stops.
+ * One task at a time. Exit 0 with a processed report means a PR was opened; anything else returns the task to pending
+ * and stops.
  * When no task is ready the loop sleeps LOOP_IDLE_MS and polls again, until the signal aborts.
  */
 export async function runLoop(
@@ -221,8 +222,9 @@ export async function runLoop(
       // Every run counts, pass or fail, so a PR that never settles ends up with a human; only a
       // successful review marks the SHA reviewed, so a crashed one is retried.
       // A failed write is not caught: without the count the same PR would be rerun forever.
-      attempts.record(pr.number, action, pr.headSha, code === 0);
-      if (code !== 0) log(`PR #${pr.number} ${action} failed (exit ${code}); continuing`);
+      const ok = code === 0 && outcome.report !== null;
+      attempts.record(pr.number, action, pr.headSha, ok);
+      if (!ok) log(`PR #${pr.number} ${action} failed (exit ${code}${outcome.report ? "" : ", no result report"}); continuing`);
       continue;
     }
 
@@ -267,9 +269,9 @@ export async function runLoop(
       }
     }
 
-    if (code !== 0) {
+    if (code !== 0 || !report) {
       store.setStatus(next.id, "pending");
-      log(`${next.id} failed (exit ${code}); returned to pending, stopping`);
+      log(`${next.id} failed (exit ${code}${report ? "" : ", no result report"}); returned to pending, stopping`);
       return { ran, stoppedOn: next.id };
     }
     if (report?.outcome === "skipped") {

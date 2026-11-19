@@ -109,8 +109,8 @@ Each turn, the loop takes the single oldest candidate across ready tasks and PRs
 **Tasks.** The loop sets the task to `in_progress` and runs `/cook <id>`.
 
 - A `processed` result moves the task to `pr`.
-- A failure (non-zero exit) or a `skipped` result returns the task to `pending` and **stops the loop**. A skip
-  records its reason on the task.
+- A failure (a non-zero exit, or exit 0 with no result report) or a `skipped` result returns the task to
+  `pending` and **stops the loop**. A skip records its reason on the task.
 
 **PRs.** `pr-state.ts` decides what each open PR needs. The first matching rule wins:
 
@@ -126,9 +126,9 @@ Each turn, the loop takes the single oldest candidate across ready tasks and PRs
   then reviewed again.
 - Every review or patch run counts as an attempt, whether it passes or fails. After `MAX_PR_ATTEMPTS` (3), the loop
   labels the PR `needs-human`, comments once, and stops working on it. Removing the label resets the count.
-- A failed or skipped review or patch is logged, and the loop carries on. A review that exits 0 (processed or
-  skipped) marks that head commit as reviewed, so it isn't reviewed again until new commits arrive. A review that
-  fails leaves the commit unreviewed, so it's retried. Patches don't mark commits.
+- A failed or skipped review or patch is logged, and the loop carries on. A review that exits 0 with a result report
+  (processed or skipped) marks that head commit as reviewed, so it isn't reviewed again until new commits arrive. A
+  review that fails, including one with no report, leaves the commit unreviewed, so it's retried. Patches don't mark commits.
 - A PR's attempt count is dropped once the PR is no longer open.
 - If listing PRs fails, the loop logs it and continues with tasks only.
 
