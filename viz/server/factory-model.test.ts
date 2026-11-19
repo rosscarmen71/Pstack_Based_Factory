@@ -63,6 +63,7 @@ const pr = (over: Partial<PrInfo>): PrInfo => ({
   mergedAt: null,
   closedAt: null,
   ci: "pass",
+  headSha: "head1",
   labels: [],
   reviews: [],
   commitDates: [],
@@ -206,13 +207,6 @@ describe("order status", () => {
 });
 
 describe("needs you", () => {
-  test("an open task PR with CI green needs a review; it resolves when merged", () => {
-    const open = buildModel(snap({ tasks: [task("a", { status: "pr" })], prs: [pr({})] }));
-    expect(open.details.get("order-a")?.needs.map((n) => [n.kind, n.resolvedAt])).toEqual([["ready_for_review", null]]);
-    const merged = buildModel(snap({ tasks: [task("a", { status: "pr" })], prs: [pr({ state: "MERGED", mergedAt: at(20) })] }));
-    expect(merged.details.get("order-a")?.needs[0]?.resolvedAt).toBe(at(20));
-  });
-
   test("a Verdict: CHANGES review is stuck until a later commit", () => {
     const review = { state: "COMMENTED", body: "**Verdict: CHANGES**\n\nbad", submittedAt: at(10) };
     const stuck = buildModel(snap({ prs: [pr({ number: 2, branch: "x/y", reviews: [review], commitDates: [at(1)] })] }));
@@ -251,14 +245,6 @@ describe("needs you", () => {
     const m = buildModel(snap({ tasks: [task("a")], transcripts: [transcript({})] }));
     expect(m.details.get("order-a")?.phases[0]?.status).toBe("fail");
     expect(m.details.get("order-a")?.loop_stops).toEqual([]);
-  });
-
-  test("a task stuck in_progress is remembered, then marked resolved once it moves on", () => {
-    const first = buildModel(snap({ tasks: [task("a", { status: "in_progress" })] }));
-    expect(first.stuckHistory).toEqual([{ taskId: "a", raisedAt: new Date(T0 + 60 * 60_000).toISOString() }]);
-    const later = buildModel(snap({ tasks: [task("a", { status: "pending" })], stuckHistory: first.stuckHistory, now: T0 + 90 * 60_000 }));
-    expect(later.stuckHistory[0]?.resolvedAt).toBe(new Date(T0 + 90 * 60_000).toISOString());
-    expect(later.details.get("order-a")?.needs.map((n) => n.kind)).toEqual(["stuck_in_progress"]);
   });
 
   test("a needs-human label is open until it is removed", () => {
@@ -302,5 +288,98 @@ describe("transcripts", () => {
       [2, "tool", undefined],
       [3, "result", false],
     ]);
+  });
+});
+
+describe("run warnings", () => {
+  const NOW = T0 + 60 * 60_000;
+  const needsOf = (m: ReturnType<typeof buildModel>) => m.details.get("order-a")?.needs.map((n) => [n.kind, n.resolvedAt]) ?? [];
+  const running = (over: Partial<Transcript>) => transcript({ startedAt: at(58), lastAt: at(59), mtimeMs: NOW - 5_000, ...over });
+
+  test("a task the loop just marked in_progress, before its transcript exists, needs nothing", () => {
+    const m = buildModel(snap({ tasks: [task("a", { status: "in_progress" })], loopRunning: true }));
+    expect(needsOf(m)).toEqual([]);
+    expect(m.stuckHistory).toEqual([]);
+  });
+
+  test("a task in_progress while the loop is not running is stranded until it moves on", () => {
+    const first = buildModel(snap({ tasks: [task("a", { status: "in_progress" })], loopRunning: false }));
+    expect(needsOf(first)).toEqual([["task_stranded", null]]);
+    const later = buildModel(snap({ tasks: [task("a")], stuckHistory: first.stuckHistory, now: NOW + 60_000 }));
+    expect(needsOf(later)).toEqual([["task_stranded", new Date(NOW + 60_000).toISOString()]]);
+  });
+
+  test("a running agent that has not written for 5 minutes is silent until it writes again", () => {
+    const quiet = buildModel(
+      snap({ tasks: [task("a", { status: "in_progress" })], loopRunning: true, transcripts: [running({ mtimeMs: NOW - 6 * 60_000 })] }),
+    );
+    expect(needsOf(quiet)).toEqual([["agent_silent", null]]);
+    const writing = buildModel(
+      snap({
+        tasks: [task("a", { status: "in_progress" })],
+        loopRunning: true,
+        transcripts: [running({ mtimeMs: NOW + 60_000 })],
+        stuckHistory: quiet.stuckHistory,
+        now: NOW + 90_000,
+      }),
+    );
+    expect(needsOf(writing)).toEqual([["agent_silent", new Date(NOW + 90_000).toISOString()]]);
+  });
+
+  test("a run going for 15 minutes or more is running long", () => {
+    const m = buildModel(snap({ tasks: [task("a", { status: "in_progress" })], loopRunning: true, transcripts: [running({ startedAt: at(44) })] }));
+    expect(needsOf(m)).toEqual([["running_long", null]]);
+  });
+
+  test("a normal running cook raises no warning", () => {
+    const m = buildModel(snap({ tasks: [task("a", { status: "in_progress" })], loopRunning: true, transcripts: [running({})] }));
+    expect(needsOf(m)).toEqual([]);
+  });
+
+  test("old stuck_in_progress history entries are dropped", () => {
+    const legacy = [{ taskId: "a", raisedAt: at(1), resolvedAt: at(2) }] as unknown as Snapshot["stuckHistory"];
+    const m = buildModel(snap({ tasks: [task("a")], stuckHistory: legacy }));
+    expect(needsOf(m)).toEqual([]);
+    expect(m.stuckHistory).toEqual([]);
+  });
+});
+
+describe("ready for your review", () => {
+  const approve = (commit: string, submittedAt: string) => ({ state: "COMMENTED", body: "Verdict: APPROVE\n\nfine", submittedAt, commit });
+  const readyOf = (m: ReturnType<typeof buildModel>) =>
+    m.details.get("order-a")?.needs.filter((n) => n.kind === "ready_for_review").map((n) => [n.raisedAt, n.resolvedAt]) ?? [];
+  const tasks = [task("a", { status: "pr" })];
+
+  test("a PR cook just opened, with CI green but no review, is not ready", () => {
+    expect(readyOf(buildModel(snap({ tasks, prs: [pr({})] })))).toEqual([]);
+  });
+
+  test("an APPROVE on an older commit does not make the PR ready", () => {
+    expect(readyOf(buildModel(snap({ tasks, prs: [pr({ reviews: [approve("old", at(10))] })] })))).toEqual([]);
+  });
+
+  test("an APPROVE on the current commit with CI green makes it ready from the review time", () => {
+    expect(readyOf(buildModel(snap({ tasks, prs: [pr({ reviews: [approve("head1", at(10))] })] })))).toEqual([[at(10), null]]);
+  });
+
+  test("a later CHANGES review on the current commit is not ready", () => {
+    const changes = { state: "COMMENTED", body: "Verdict: CHANGES\n\nbad", submittedAt: at(12), commit: "head1" };
+    expect(readyOf(buildModel(snap({ tasks, prs: [pr({ reviews: [approve("head1", at(10)), changes] })] })))).toEqual([]);
+  });
+
+  test("the changes-requested or needs-human label means not ready", () => {
+    for (const label of ["changes-requested", "needs-human"]) {
+      const m = buildModel(snap({ tasks, prs: [pr({ labels: [label], reviews: [approve("head1", at(10))] })] }));
+      expect(readyOf(m)).toEqual([]);
+    }
+  });
+
+  test("failing CI means not ready", () => {
+    expect(readyOf(buildModel(snap({ tasks, prs: [pr({ ci: "fail", reviews: [approve("head1", at(10))] })] })))).toEqual([]);
+  });
+
+  test("a ready PR resolves when it is merged", () => {
+    const m = buildModel(snap({ tasks, prs: [pr({ state: "MERGED", mergedAt: at(20), reviews: [approve("head1", at(10))] })] }));
+    expect(readyOf(m)).toEqual([[at(10), at(20)]]);
   });
 });
