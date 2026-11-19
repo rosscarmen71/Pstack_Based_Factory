@@ -592,12 +592,12 @@ describe("runLoop agent result report", () => {
     expect(logs.some((m) => m.includes("skipped") && m.includes("task already done"))).toBe(true);
   });
 
-  test("exit 0 with no report is audited as failure but the task still goes to pr", async () => {
+  test("exit 0 with no report is a failure: the task returns to pending and the loop stops", async () => {
     const { store, tasks } = memStore([task("A"), task("B")]);
     const { audit, entries } = fakeAudit();
     const out = await runLoop(store, async () => res(0, null), undefined, { ...fakeSleep(), audit });
-    expect(out.stoppedOn).toBeNull();
-    expect(tasks.map((t) => t.status)).toEqual(["pr", "pr"]);
+    expect(out.stoppedOn).toBe("A");
+    expect(tasks.map((t) => t.status)).toEqual(["pending", "pending"]);
     expect(entries[0]).toMatchObject({ outcome: "failure", exitCode: 0, reason: "agent returned no result report" });
   });
 
@@ -641,7 +641,7 @@ describe("runLoop agent result report", () => {
     expect(entries[0]).toMatchObject({ action: "patch", target: 8, outcome: "skip", reason: "PR is already merged" });
   });
 
-  test("a PR run with exit 0 and no report is audited as failure but marks the SHA reviewed as before", async () => {
+  test("a PR review with exit 0 and no report is a failure: it counts an attempt but leaves the SHA unreviewed", async () => {
     const { source, close } = onceSource(openPr(7));
     const attempts = realAttempts();
     const { store } = memStore([]);
@@ -651,7 +651,8 @@ describe("runLoop agent result report", () => {
       return res(0, null);
     };
     await runLoop(store, async () => res(), undefined, { ...fakeSleep(), prs: source, attempts, runPr, audit });
-    expect(attempts.get(7)?.reviewedSha).toBe("sha7");
+    expect(attempts.get(7)?.reviews).toBe(1);
+    expect(attempts.get(7)?.reviewedSha).toBeUndefined();
     expect(entries[0]).toMatchObject({ action: "review", outcome: "failure", exitCode: 0, reason: "agent returned no result report" });
   });
 });
