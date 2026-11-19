@@ -5,7 +5,7 @@
     "": {
       "name": "sssf-visualizer",
       "dependencies": {
-        "@anthropic-ai/claude-agent-sdk": "^0.3.328",
+        "@anthropic-ai/claude-agent-sdk": "0.3.328",
         "@fontsource/play": "^5.3.0",
         "lucide-vue-next": "^1.0.0",
         "vue": "^3.5.13",
