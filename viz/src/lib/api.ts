@@ -10,6 +10,7 @@ import type {
   OrderSummary,
   PromptsResponse,
 } from './types'
+import type { AnswerBody, CustomizeState, ReplyBody } from '@shared/customize'
 
 async function getJson(url: string): Promise<unknown> {
   const res = await fetch(url)
@@ -66,21 +67,31 @@ export async function takeOver(uuid: string): Promise<TakeOverResult> {
   return (await res.json()) as TakeOverResult
 }
 
-export interface CustomizeTerminalResult {
-  ok: boolean
-  /** "focused": the agent's existing window came forward. "opened": it was gone, so a new one runs /customize_order. */
-  action: 'focused' | 'opened'
+async function sendJson(url: string, body: unknown): Promise<void> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(err?.error ?? `POST ${url} → ${res.status}`)
+  }
 }
 
-/** Brings the Terminal window where /customize_order is grilling you to the front, or reopens it. */
-export async function openCustomizeTerminal(pr: number): Promise<CustomizeTerminalResult> {
-  const url = `/api/customize-terminal/${pr}`
-  const res = await fetch(url, { method: 'POST' })
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null
-    throw new Error(body?.error ?? `POST ${url} → ${res.status}`)
-  }
-  return (await res.json()) as CustomizeTerminalResult
+/** The /customize_order agent for this PR: its status and the questions it is waiting on. */
+export function getCustomize(pr: number): Promise<CustomizeState> {
+  return getJson(`/api/customize/${pr}`) as Promise<CustomizeState>
+}
+
+/** Answers the pending question card. */
+export function answerCustomize(pr: number, body: AnswerBody): Promise<void> {
+  return sendJson(`/api/customize/${pr}/answer`, body)
+}
+
+/** Free-text reply, for when the agent asked in plain text. */
+export function replyCustomize(pr: number, body: ReplyBody): Promise<void> {
+  return sendJson(`/api/customize/${pr}/reply`, body)
 }
 
 export async function fetchEvents(adwId: string, after: number, limit = 500): Promise<EventsPage> {

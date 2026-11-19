@@ -19,6 +19,7 @@ import {
   Fingerprint,
   GitPullRequest,
   Inbox,
+  MessageCircleQuestion,
   Package,
   Radio,
   Receipt,
@@ -31,7 +32,8 @@ import { fmtClock, payloadOk, ts } from '../lib/format'
 import { highlightJson, highlightJsonText } from '../lib/highlight'
 import { eventLabel, parseAgentStart, parseToolCall } from '../lib/events'
 import { modelIcon, modelName } from '../lib/models'
-import { fetchFeed, openCustomizeTerminal, takeOver } from '../lib/api'
+import type { AgentQuestion, CustomizeState } from '@shared/customize'
+import { answerCustomize, fetchFeed, getCustomize, replyCustomize, takeOver } from '../lib/api'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import DetailSection from './DetailSection.vue'
@@ -270,8 +272,8 @@ function argsHtml(call: ToolCallPayload | null): string {
 // (a stable string), so the 500ms poll replacing the phase object never resets
 // a user's open/closed choices — only selecting a different phase does.
 
-// The PR and Terminal buttons, checklist, task and feed start open; the rest the engineer opens as needed.
-const DEFAULT_OPEN_SECTIONS: string[] = ['pr', 'terminal', 'gates', 'task', 'feed']
+// The PR button, agent questions, checklist, task and feed start open; the rest the engineer opens as needed.
+const DEFAULT_OPEN_SECTIONS: string[] = ['pr', 'agent', 'gates', 'task', 'feed']
 const openSections = reactive(new Set<string>(DEFAULT_OPEN_SECTIONS))
 
 watch(
@@ -289,40 +291,52 @@ function toggleSection(id: string) {
 }
 
 // ── Focus: what the newest open need on this block is about ──────────────────
-// PR needs focus the "Open PR" button; a task-change request focuses the agent feed and its Terminal button.
+// PR needs focus the "Open PR" button; a task-change request focuses the agent's question card (or reply box).
 
 const PR_NEEDS: NeedKind[] = ['ready_for_review', 'stuck_changes', 'needs_human']
 
-const showTerminal = computed(
+const showAgent = computed(
   () => props.pr !== null && (props.phase.name === 'customize_order' || props.focusKind === 'task_change_requested'),
 )
 
 const prSec = useTemplateRef<HTMLElement>('prSec')
-const termSec = useTemplateRef<HTMLElement>('termSec')
+const agentSec = useTemplateRef<HTMLElement>('agentSec')
 const prBtn = useTemplateRef<HTMLElement>('prBtn')
-const termBtn = useTemplateRef<HTMLElement>('termBtn')
-const flash = ref<'pr' | 'terminal' | null>(null)
+const flash = ref<'pr' | 'agent' | null>(null)
 let flashTimer: ReturnType<typeof setTimeout> | undefined
 
+// Set by a click that wanted the question card or reply box before the agent had one; the poll that first
+// brings one up consumes it. Never set by polling itself, so a poll can't pull focus away from what you're doing.
+let pendingAgentFocus = false
+
+/** Focuses the first option of the question card, else the reply box. False when neither is on screen yet. */
+function focusAgentInput(): boolean {
+  const el = agentSec.value?.querySelector<HTMLElement>('[data-agent-focus]')
+  if (!el) return false
+  el.focus({ preventScroll: true })
+  return true
+}
+
 async function applyFocus() {
+  pendingAgentFocus = false
   const kind = props.focusKind
   const target =
     kind && PR_NEEDS.includes(kind) && props.pr
       ? 'pr'
-      : kind === 'task_change_requested' && showTerminal.value
-        ? 'terminal'
+      : kind === 'task_change_requested' && showAgent.value
+        ? 'agent'
         : null
   if (!target) return
   if (target === 'pr') openSections.add('pr')
   else {
-    openSections.add('terminal')
+    openSections.add('agent')
     openSections.add('feed')
   }
   await nextTick()
-  const sec = target === 'pr' ? prSec.value : termSec.value
-  const btn = target === 'pr' ? prBtn.value : termBtn.value
+  const sec = target === 'pr' ? prSec.value : agentSec.value
   sec?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  btn?.focus({ preventScroll: true })
+  if (target === 'pr') prBtn.value?.focus({ preventScroll: true })
+  else if (!focusAgentInput()) pendingAgentFocus = true
   flash.value = target
   clearTimeout(flashTimer)
   flashTimer = setTimeout(() => (flash.value = null), 2500)
@@ -365,24 +379,157 @@ async function doTakeOver() {
   }
 }
 
-// ── Terminal window of the /customize_order agent ────────────────────────────
+// ── Questions from the /customize_order agent ────────────────────────────────
 
-const termState = ref<{ kind: 'busy' | 'ok' | 'err'; text: string } | null>(null)
+const OTHER_PLACEHOLDER = 'Other: type your own answer'
 
-async function doOpenTerminal() {
-  if (!props.pr) return
-  termState.value = { kind: 'busy', text: 'Bringing the window forward…' }
+interface Draft {
+  /** Chosen option labels (one for single-select). */
+  picked: string[]
+  otherOn: boolean
+  otherText: string
+}
+
+const cz = ref<CustomizeState | null>(null)
+const czError = ref<string | null>(null)
+const drafts = ref<Draft[]>([])
+let draftId: string | null = null
+const sentId = ref<string | null>(null)
+const submitting = ref(false)
+const submitError = ref<string | null>(null)
+const replyText = ref('')
+const replySending = ref(false)
+const replyNote = ref<{ kind: 'ok' | 'err'; text: string } | null>(null)
+let czGen = 0
+let czTimer: ReturnType<typeof setTimeout> | undefined
+
+const pending = computed(() => (cz.value?.status === 'waiting' ? cz.value.pending : null))
+
+// A new question set starts with empty answers; polls of the same set leave what you've picked alone.
+function syncDraft(s: CustomizeState) {
+  const id = s.pending?.id ?? null
+  if (id === draftId) return
+  draftId = id
+  drafts.value = (s.pending?.questions ?? []).map(() => ({ picked: [], otherOn: false, otherText: '' }))
+  submitError.value = null
+}
+
+function stopCustomize() {
+  clearTimeout(czTimer)
+  czGen += 1
+}
+
+async function pollCustomize(gen: number, pr: number) {
   try {
-    const r = await openCustomizeTerminal(props.pr.number)
-    termState.value = {
-      kind: 'ok',
-      text:
-        r.action === 'focused'
-          ? 'Brought its Terminal window forward.'
-          : 'That window was gone, so a new one is running /customize_order.',
+    const s = await getCustomize(pr)
+    if (gen !== czGen) return
+    cz.value = s
+    czError.value = null
+    syncDraft(s)
+    if (pendingAgentFocus) {
+      if (s.status === 'waiting' || s.status === 'idle') {
+        await nextTick()
+        if (gen === czGen && focusAgentInput()) pendingAgentFocus = false
+      } else if (s.status === 'done' || s.status === 'failed' || s.status === 'none') {
+        pendingAgentFocus = false
+      }
     }
   } catch (err) {
-    termState.value = { kind: 'err', text: err instanceof Error ? err.message : String(err) }
+    if (gen !== czGen) return
+    czError.value = err instanceof Error ? err.message : String(err)
+  }
+  if (gen === czGen) czTimer = setTimeout(() => void pollCustomize(gen, pr), 1000)
+}
+
+// Polls while the section is on screen; a different phase or PR starts over, and leaving stops it.
+watch(
+  [() => (showAgent.value ? (props.pr?.number ?? null) : null), () => props.phase.phase_id],
+  ([pr]) => {
+    stopCustomize()
+    cz.value = null
+    czError.value = null
+    draftId = null
+    drafts.value = []
+    sentId.value = null
+    submitError.value = null
+    replyText.value = ''
+    replyNote.value = null
+    if (pr !== null) void pollCustomize(czGen, pr)
+  },
+  { immediate: true },
+)
+
+function pickOption(qi: number, q: AgentQuestion, label: string) {
+  const d = drafts.value[qi]
+  if (!d) return
+  if (q.multiSelect) {
+    d.picked = d.picked.includes(label) ? d.picked.filter((l) => l !== label) : [...d.picked, label]
+  } else {
+    d.picked = [label]
+    d.otherOn = false
+  }
+}
+
+function pickOther(qi: number, q: AgentQuestion) {
+  const d = drafts.value[qi]
+  if (!d) return
+  if (q.multiSelect) d.otherOn = !d.otherOn
+  else {
+    d.otherOn = true
+    d.picked = []
+  }
+}
+
+// Typing in the Other box means you want Other.
+function typeOther(qi: number, q: AgentQuestion) {
+  const d = drafts.value[qi]
+  if (d && !d.otherOn) pickOther(qi, q)
+}
+
+function answerFor(d: Draft | undefined): string {
+  if (!d) return ''
+  const parts = [...d.picked]
+  const other = d.otherText.trim()
+  if (d.otherOn && other) parts.push(other)
+  return parts.join(', ')
+}
+
+const canSubmit = computed(() => {
+  const p = pending.value
+  if (!p || submitting.value || sentId.value === p.id) return false
+  return p.questions.every((_, i) => answerFor(drafts.value[i]) !== '')
+})
+
+async function submitAnswers() {
+  const p = pending.value
+  if (!p || !props.pr || !canSubmit.value) return
+  const answers: Record<string, string> = {}
+  p.questions.forEach((q, i) => (answers[q.question] = answerFor(drafts.value[i])))
+  submitting.value = true
+  submitError.value = null
+  try {
+    await answerCustomize(props.pr.number, { id: p.id, answers })
+    sentId.value = p.id
+  } catch (err) {
+    submitError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function sendReply() {
+  const text = replyText.value.trim()
+  if (!text || !props.pr || replySending.value) return
+  replySending.value = true
+  replyNote.value = null
+  try {
+    await replyCustomize(props.pr.number, { text })
+    replyText.value = ''
+    replyNote.value = { kind: 'ok', text: 'sent' }
+  } catch (err) {
+    replyNote.value = { kind: 'err', text: err instanceof Error ? err.message : String(err) }
+  } finally {
+    replySending.value = false
   }
 }
 
@@ -426,7 +573,6 @@ watch(
     feedLive.value = false
     feedError.value = null
     takeState.value = null
-    termState.value = null
     void pumpFeed(feedGen)
   },
   { immediate: true },
@@ -454,6 +600,7 @@ onUnmounted(() => {
   clearTimeout(flashTimer)
   clearTimeout(feedTimer)
   feedGen += 1
+  stopCustomize()
 })
 </script>
 
@@ -631,28 +778,108 @@ onUnmounted(() => {
           </div>
         </DetailSection>
 
-        <div v-if="showTerminal" ref="termSec" class="focus-sec" :class="{ flash: flash === 'terminal' }">
+        <div
+          v-if="showAgent"
+          ref="agentSec"
+          class="focus-sec"
+          :class="{ flash: flash === 'agent' }"
+          @focusin="pendingAgentFocus = false"
+        >
           <DetailSection
-            title="terminal window"
-            :icon="SquareTerminal"
-            :open="openSections.has('terminal')"
-            @toggle="toggleSection('terminal')"
+            title="agent questions"
+            :icon="MessageCircleQuestion"
+            :open="openSections.has('agent')"
+            @toggle="toggleSection('agent')"
           >
-            <p class="dim d-desc">
-              The /customize_order agent asks its questions in a Terminal window. Answer there; this brings that
-              window forward, or reopens it if it was closed.
-            </p>
-            <button
-              ref="termBtn"
-              class="action-btn"
-              :disabled="termState?.kind === 'busy'"
-              @click="doOpenTerminal"
-            >
-              <Terminal :size="18" :stroke-width="2" /> Open its Terminal window
-            </button>
-            <span v-if="termState" class="action-note" :class="termState.kind === 'err' ? 't-red' : 't-green'">{{
-              termState.text
-            }}</span>
+            <div v-if="czError" class="error-bar d-error">{{ czError }}</div>
+            <div v-if="!cz" class="faint">loading…</div>
+
+            <template v-else-if="cz.status === 'waiting' && pending">
+              <div
+                v-for="(q, qi) in pending.questions"
+                :key="`${pending.id}:${qi}`"
+                class="q-card"
+                @keydown.ctrl.enter.prevent="submitAnswers"
+                @keydown.meta.enter.prevent="submitAnswers"
+              >
+                <div class="q-head">
+                  <span v-if="q.header" class="cfg-chip">{{ q.header }}</span>
+                  <span v-if="q.multiSelect" class="faint">choose any</span>
+                </div>
+                <p class="q-text">{{ q.question }}</p>
+                <div class="q-opts" role="group" :aria-label="q.question">
+                  <label v-for="(o, oi) in q.options" :key="o.label" class="q-opt">
+                    <input
+                      :type="q.multiSelect ? 'checkbox' : 'radio'"
+                      :name="`q-${pending.id}-${qi}`"
+                      :checked="drafts[qi]?.picked.includes(o.label)"
+                      :disabled="sentId === pending.id"
+                      :data-agent-focus="qi === 0 && oi === 0 ? '' : undefined"
+                      @change="pickOption(qi, q, o.label)"
+                    />
+                    <span class="q-opt-body">
+                      <span class="q-opt-label">{{ o.label }}</span>
+                      <span v-if="o.description" class="q-opt-desc dim">{{ o.description }}</span>
+                    </span>
+                  </label>
+                  <label class="q-opt">
+                    <input
+                      :type="q.multiSelect ? 'checkbox' : 'radio'"
+                      :name="`q-${pending.id}-${qi}`"
+                      :checked="drafts[qi]?.otherOn"
+                      :disabled="sentId === pending.id"
+                      :data-agent-focus="qi === 0 && !q.options.length ? '' : undefined"
+                      @change="pickOther(qi, q)"
+                    />
+                    <span class="q-opt-body">
+                      <span class="q-opt-label">Other</span>
+                      <input
+                        v-if="drafts[qi]"
+                        v-model="drafts[qi]!.otherText"
+                        class="q-other"
+                        type="text"
+                        :placeholder="OTHER_PLACEHOLDER"
+                        :disabled="sentId === pending.id"
+                        @input="typeOther(qi, q)"
+                        @keydown.enter.prevent
+                      />
+                    </span>
+                  </label>
+                </div>
+              </div>
+              <div class="q-actions">
+                <button class="action-btn" :disabled="!canSubmit" @click="submitAnswers">Submit</button>
+                <span class="faint">Cmd/Ctrl+Enter submits</span>
+                <span v-if="sentId === pending.id" class="t-green">sent</span>
+                <span v-if="submitError" class="t-red">{{ submitError }}</span>
+              </div>
+            </template>
+
+            <template v-else-if="cz.status === 'idle'">
+              <p class="dim d-desc">The agent asked in plain text; answer here.</p>
+              <textarea
+                v-model="replyText"
+                class="q-reply"
+                rows="4"
+                data-agent-focus
+                placeholder="Your answer"
+                :disabled="replySending"
+                @keydown.ctrl.enter.prevent="sendReply"
+                @keydown.meta.enter.prevent="sendReply"
+              />
+              <div class="q-actions">
+                <button class="action-btn" :disabled="!replyText.trim() || replySending" @click="sendReply">Send</button>
+                <span class="faint">Cmd/Ctrl+Enter sends</span>
+                <span v-if="replyNote" :class="replyNote.kind === 'err' ? 't-red' : 't-green'">{{ replyNote.text }}</span>
+              </div>
+            </template>
+
+            <div v-else-if="cz.status === 'starting' || cz.status === 'running' || cz.status === 'waiting'" class="dim">
+              The agent is working…
+            </div>
+            <div v-else-if="cz.status === 'done'" class="t-green">Request answered.</div>
+            <div v-else-if="cz.status === 'failed'" class="t-red">{{ cz.error ?? 'The agent failed.' }}</div>
+            <div v-else class="faint">No agent for this PR yet.</div>
           </DetailSection>
         </div>
 
@@ -986,8 +1213,96 @@ onUnmounted(() => {
   outline-offset: 3px;
 }
 
-.action-note {
-  margin-left: 12px;
+/* ── agent questions ── */
+
+.q-card {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel-3);
+}
+
+.q-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.q-text {
+  margin: 8px 0;
+  color: var(--text);
+  font-weight: 700;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.q-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.q-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.q-opt input[type='radio'],
+.q-opt input[type='checkbox'] {
+  flex: none;
+  margin-top: 5px;
+  accent-color: var(--cyan);
+}
+
+.q-opt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.q-opt-label {
+  color: var(--text);
+}
+
+.q-opt-desc {
+  overflow-wrap: anywhere;
+}
+
+.q-other,
+.q-reply {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 16px;
+}
+
+.q-reply {
+  resize: vertical;
+}
+
+.q-other:focus-visible,
+.q-reply:focus-visible,
+.q-opt input:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.q-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
 }
 
 /* A focused section glows briefly so the eye finds it after the scroll. */
