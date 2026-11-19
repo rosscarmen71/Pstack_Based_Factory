@@ -239,6 +239,7 @@ describe("runLoop PR routing", () => {
     mergeable: "clean",
     reviewDecision: "none",
     labels: [],
+    comments: [],
     ...over,
   });
   const stamped = (id: string, createdAt: string): Task => ({ ...task(id), createdAt });
@@ -358,6 +359,7 @@ describe("runLoop audit log", () => {
     mergeable: "clean",
     reviewDecision: "none",
     labels: [],
+    comments: [],
     ...over,
   });
 
@@ -544,6 +546,7 @@ describe("runLoop agent result report", () => {
     mergeable: "clean",
     reviewDecision: "none",
     labels: [],
+    comments: [],
     ...over,
   });
 
@@ -724,7 +727,7 @@ describe("prRunner", () => {
     const stub = ["sh", "-c", `printf '%s' "$0"`, JSON.stringify({ result: "reviewed {pr}", structured_output: { outcome: "skipped", reason: "closed" } })];
     const printed: string[] = [];
     const out = await prRunner(stub, stub, (m) => printed.push(m))(
-      { number: 4, url: "https://github.com/acme/widgets/pull/4", repo: "acme/widgets", title: "t", branch: "b", createdAt: "x", isDraft: false, headSha: "s", ci: "pass", mergeable: "clean", reviewDecision: "none", labels: [] },
+      { number: 4, url: "https://github.com/acme/widgets/pull/4", repo: "acme/widgets", title: "t", branch: "b", createdAt: "x", isDraft: false, headSha: "s", ci: "pass", mergeable: "clean", reviewDecision: "none", labels: [], comments: [] },
       "review",
     );
     expect(out).toEqual({ exitCode: 0, report: { outcome: "skipped", reason: "closed" } });

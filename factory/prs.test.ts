@@ -45,6 +45,7 @@ test("normalizes the base fields and asks gh for open PRs", async () => {
       mergeable: "clean",
       reviewDecision: "none",
       labels: [],
+      comments: [],
     },
   ]);
   expect(calls[0]).toContain("open");
@@ -133,4 +134,18 @@ test("invalid JSON throws an error naming the cause", async () => {
 test("a malformed entry throws naming the PR and field", async () => {
   const gh: GhRunner = async () => ({ exitCode: 0, stdout: JSON.stringify([{ number: 3 }]), stderr: "" });
   await expect(ghPrSource(gh).list()).rejects.toThrow(/PR #3 has no string "title"/);
+});
+test("maps comments to body and createdAt, dropping the rest", async () => {
+  const pr = await one({
+    comments: [{ body: "/remake fix it", createdAt: "2026-10-30T10:00:00Z", author: { login: "me" }, id: "x" }],
+  });
+  expect(pr.comments).toEqual([{ body: "/remake fix it", createdAt: "2026-10-30T10:00:00Z" }]);
+});
+
+test("a missing comments array becomes []", async () => {
+  expect((await one({})).comments).toEqual([]);
+});
+
+test("asks gh for comments", () => {
+  expect(PR_JSON_FIELDS.split(",")).toContain("comments");
 });

@@ -68,6 +68,7 @@ const pr = (number: number, branch: string, over: Partial<PullRequest> = {}): Pu
   mergeable: "clean",
   reviewDecision: "approved", // settled: the loop has nothing to do with it
   labels: [],
+  comments: [],
   ...over,
 });
 

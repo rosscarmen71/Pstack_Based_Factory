@@ -119,7 +119,7 @@ async function gh(args: string[]): Promise<string> {
 }
 
 // No `commits` here: commits x authors blows GitHub's node limit on a 100-PR list, so commit dates are fetched per PR, only when needed.
-const PR_FIELDS = "number,url,title,headRefName,state,createdAt,mergedAt,closedAt,statusCheckRollup,labels,reviews,headRefOid";
+const PR_FIELDS = "number,url,title,headRefName,state,createdAt,mergedAt,closedAt,statusCheckRollup,labels,reviews,headRefOid,comments";
 const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 
 interface RawPr {
@@ -134,6 +134,7 @@ interface RawPr {
   statusCheckRollup: { conclusion?: string | null; state?: string | null; status?: string | null }[] | null;
   labels: { name: string }[];
   headRefOid: string;
+  comments?: { body: string; createdAt: string }[];
   reviews: { state: string; body: string; submittedAt: string; commit: { oid: string } }[];
 }
 
@@ -172,6 +173,7 @@ async function readPrs(now: number): Promise<PrInfo[]> {
       labels: r.labels.map((l) => l.name),
       reviews: r.reviews.map((v) => ({ state: v.state, body: v.body, submittedAt: v.submittedAt, commit: v.commit.oid })),
       commitDates: [] as string[],
+      comments: (r.comments ?? []).map((c) => ({ body: c.body, createdAt: c.createdAt })),
     }));
     // A CHANGES verdict is resolved by a later commit, so only those PRs need their commit dates.
     await Promise.all(

@@ -91,7 +91,7 @@ Merging is always up to you. The loop never merges.
 ### Skills
 
 - **Run by the loop:** `cook` (task → PR), `taste_test` (review a PR), `remake` (fix a PR).
-- **Run by you:** `take_order` (add tasks).
+- **Run by you:** `take_order` (add tasks), `customize_order` (change a PR's task when a comment asks for it).
 - **Used inside those:** `cook_poteto` does the actual coding, review and fixing. `to_tasks`, `grill-with-docs`, `interrogate` and the `principle-*` skills are read along the way. The rest of `factory/skills/` are general pstack and Matt Pocock skills you can also run yourself.
 
 ### Tasks
@@ -115,17 +115,30 @@ Each turn, the loop takes the single oldest candidate across ready tasks and PRs
 **PRs.** `pr-state.ts` decides what each open PR needs. The first matching rule wins:
 
 1. Draft, or labelled `needs-human` → nothing
-2. CI failing, merge conflict, changes requested, or labelled `changes-requested` → **patch** (`/remake`)
-3. Approved with CI passing → nothing
-4. New commits since the last review → **review** (`/taste_test`)
-5. Anything else → nothing
+2. An unanswered `/customize_order` comment → nothing, until you run `/customize_order <pr>`
+3. CI failing, merge conflict, changes requested, labelled `changes-requested`, or an unanswered `/remake` comment →
+   **patch** (`/remake`)
+4. Approved with CI passing → nothing
+5. New commits since the last review → **review** (`/taste_test`)
+6. Anything else → nothing
+
+**Asking for changes on a PR.** Leave the PR open and comment. Closing a PR means "stop": the loop only works on open
+PRs. The factory posts as your GitHub login, so it only acts on comments that start with a command:
+
+- `/remake <what to change>`: the loop runs `/remake` on its next pass. The request is answered once a
+  `## Remake summary` comment is posted after it.
+- `/customize_order <what to change>`: use this when the change alters the task itself, such as its acceptance
+  criteria. The loop leaves the PR alone and the visualizer shows a "Comment asks to change the task" dot. Run
+  `/customize_order <pr>` yourself: it confirms the task change with you, updates the task and the PR, and posts a
+  `## Customize order summary`. The loop then reviews the PR against the new task.
 
 - PRs that `/cook` opened are reviewed and patched like any other open PR.
 - The factory usually authors its own PRs, and GitHub won't let an author request changes. So `/taste_test` adds the
   `changes-requested` label when it finds problems, and `/remake` removes it after pushing a fix. The new commit is
   then reviewed again.
 - Every review or patch run counts as an attempt, whether it passes or fails. After `MAX_PR_ATTEMPTS` (3), the loop
-  labels the PR `needs-human`, comments once, and stops working on it. Removing the label resets the count.
+  labels the PR `needs-human`, comments once, and stops working on it. Removing the label resets the count, and so
+  does each new `/remake` comment or finished `/customize_order`.
 - A failed or skipped review or patch is logged, and the loop carries on. A review that exits 0 with a result report
   (processed or skipped) marks that head commit as reviewed, so it isn't reviewed again until new commits arrive. A
   review that fails, including one with no report, leaves the commit unreviewed, so it's retried. Patches don't mark commits.
@@ -187,12 +200,13 @@ every half second.
 - **Sessions screen.** One card per `/take_order` order (tasks added together), plus an "Unlinked PRs" card for runs on
   PRs whose branch matches no task. Each card shows broken, running, done or waiting, and "needs you: N".
 - **Waterfall.**
-  - One lane per task. Its `cook`, `taste_test` and `remake` runs are blocks in time order: green worked, red broke
+  - One lane per task. Its `cook`, `taste_test`, `remake` and `customize_order` runs are blocks in time order: green worked, red broke
     (including `failed:` skips), amber skipped. A task that hasn't started shows a dashed "waiting on …" block.
   - Ticks inside a block are milestone commands (branch, commit, checks, verifier, push, PR, review). Hover one for
     the command and whether it worked.
   - The top "You" lane has a dot for everything that needs you: loop stopped, `needs-human`, a stuck
-    `Verdict: CHANGES`, a task PR ready to review, or a task stuck `in_progress`. Resolved dots stay greyed. Click a
+    `Verdict: CHANGES`, a task PR ready to review, a comment asking to change the task, a task stranded
+    `in_progress`, or a run that has gone quiet or is taking long. Resolved dots stay greyed. Click a
     dot to jump to its block, then click the block to open the PR or the run.
 - **Run panel.** Click a block to see the task, a result checklist (exit code, report, task status, PR, CI), the
   milestones, token usage and the agent's live feed. **Take over in Claude Code** opens Terminal running

@@ -25,10 +25,11 @@ import type {
   SessionStatus,
   SessionSummary,
 } from "../shared/types.ts";
+import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, startsWithWord } from "../../factory/pr-state.ts";
 
 // ── Inputs ──────────────────────────────────────────────────────────────────
 
-export type RunKind = "cook" | "taste_test" | "remake";
+export type RunKind = "cook" | "taste_test" | "remake" | "customize_order";
 
 export interface Milestone {
   title: string;
@@ -50,7 +51,7 @@ export interface Tokens {
 export interface Transcript {
   sessionId: string;
   kind: RunKind;
-  /** Task id for cook, PR number (as text) for taste_test and remake. */
+  /** Task id for cook, PR number (as text) for taste_test, remake and customize_order. */
   target: string;
   startedAt: string;
   lastAt: string;
@@ -84,6 +85,13 @@ export interface PrInfo {
   labels: string[];
   reviews: PrReview[];
   commitDates: string[];
+  /** Plain PR comments (not reviews), oldest first as GitHub returns them. */
+  comments: PrComment[];
+}
+
+export interface PrComment {
+  body: string;
+  createdAt: string;
 }
 
 export interface LabelEvent {
@@ -116,7 +124,13 @@ export interface Snapshot {
 
 // ── Outputs beyond their shared types ───────────────────────────────────────
 
-export type NeedKind = "loop_stopped" | "needs_human" | "stuck_changes" | "ready_for_review" | WarningKind;
+export type NeedKind =
+  | "loop_stopped"
+  | "needs_human"
+  | "stuck_changes"
+  | "ready_for_review"
+  | "task_change_requested"
+  | WarningKind;
 
 export interface Need {
   id: string;
@@ -185,7 +199,13 @@ export const LONG_RUN_MS = 15 * 60_000;
 /** A run whose transcript ended with no audit row: it ran outside the loop, or was cut off before the loop recorded it. */
 const NO_AUDIT_TEXT = "no result in the audit log (ran outside the loop, or was cut off)";
 
-const AUDIT_ACTION: Record<RunKind, AuditAction> = { cook: "dev-task", taste_test: "review", remake: "patch" };
+/** The audit action a run kind writes; customize_order is run by a human, never the loop, so it has none. */
+const AUDIT_ACTION: Record<RunKind, AuditAction | null> = {
+  cook: "dev-task",
+  taste_test: "review",
+  remake: "patch",
+  customize_order: null,
+};
 const RUN_KIND: Record<AuditAction, RunKind> = { "dev-task": "cook", review: "taste_test", patch: "remake" };
 
 // ── Milestones ──────────────────────────────────────────────────────────────
@@ -290,8 +310,9 @@ export interface Run {
 
 const taskForBranch = (tasks: Task[], branch: string) => tasks.find((t) => branch.endsWith(`/${t.id}`)) ?? null;
 
-export function runStatus(audit: AuditEntry | null, live: boolean): RunStatus {
-  if (!audit) return live ? "running" : "fail";
+/** auditless: the run kind never gets an audit row (customize_order), so ending without one is not a failure. */
+export function runStatus(audit: AuditEntry | null, live: boolean, auditless = false): RunStatus {
+  if (!audit) return live ? "running" : auditless ? "success" : "fail";
   if (audit.outcome === "success") return "success";
   if (audit.outcome === "failure") return "fail";
   return (audit.reason ?? "").startsWith("failed:") ? "fail" : "skipped";
@@ -309,6 +330,7 @@ export function buildRuns(snap: Snapshot): Run[] {
         .filter(
           (a) =>
             !used.has(a) &&
+            AUDIT_ACTION[t.kind] !== null &&
             a.action === AUDIT_ACTION[t.kind] &&
             String(a.target) === t.target &&
             Date.parse(a.at) >= start - 5_000,
@@ -316,7 +338,9 @@ export function buildRuns(snap: Snapshot): Run[] {
         .toSorted((a, b) => Date.parse(a.at) - Date.parse(b.at))[0] ?? null;
     if (audit) used.add(audit);
     const laterStarted = transcripts.slice(i + 1).some((n) => Date.parse(n.startedAt) > start);
-    const live = !audit && (snap.now - t.mtimeMs < LIVE_WRITE_MS || (snap.loopRunning && !laterStarted));
+    // The loop never runs customize_order, so a running loop says nothing about whether one is live.
+    const live =
+      !audit && (snap.now - t.mtimeMs < LIVE_WRITE_MS || (t.kind !== "customize_order" && snap.loopRunning && !laterStarted));
     runs.push(makeRun(snap, t.kind, t.target, `run:${t.sessionId}`, t.startedAt, audit, t, live));
   }
   for (const a of snap.audit) {
@@ -342,7 +366,7 @@ function makeRun(
       ? (snap.prs.find((p) => taskForBranch(snap.tasks, p.branch)?.id === target) ?? null)
       : (snap.prs.find((p) => String(p.number) === target) ?? null);
   const lane = kind === "cook" ? target : (pr && taskForBranch(snap.tasks, pr.branch)?.id) || `PR #${target}`;
-  const status = runStatus(audit, live);
+  const status = runStatus(audit, live, AUDIT_ACTION[kind] === null);
   const endedAt = status === "running" ? null : (audit?.at ?? transcript?.lastAt ?? startedAt);
   return { id, kind, target, lane, startedAt, endedAt, status, audit, transcript, pr };
 }
@@ -427,6 +451,30 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
         phaseId: anchor(review.submittedAt),
         raisedAt: review.submittedAt,
         resolvedAt: firstAfter([...pr.commitDates, closedAt], review.submittedAt),
+        goTo,
+      });
+    }
+
+    const summaries = pr.comments.filter((c) => c.body.trimStart().startsWith(CUSTOMIZE_SUMMARY_HEADING)).map((c) => c.createdAt);
+    const requests = pr.comments
+      .filter((c) => startsWithWord(c.body, CUSTOMIZE_COMMAND))
+      .toSorted((x, y) => x.createdAt.localeCompare(y.createdAt))
+      .map((c) => ({ at: c.createdAt, resolvedAt: firstAfter([...summaries, closedAt], c.createdAt) }));
+    // One /customize_order run answers every request before its summary, so only the newest unanswered one is shown.
+    const newestOpen = requests.findLast((q) => q.resolvedAt === null);
+    for (const q of requests) {
+      if (q.resolvedAt === null && q !== newestOpen) continue;
+      needs.push({
+        id: `task_change_requested:${pr.number}:${q.at}`,
+        kind: "task_change_requested",
+        severity: "review",
+        title: "Comment asks to change the task",
+        description: `A comment on PR #${pr.number} asks to change the task. Run /customize_order ${pr.number} yourself; the loop never runs it.`,
+        sessionId: sessionOfLane(lane),
+        lane,
+        phaseId: anchor(q.at),
+        raisedAt: q.at,
+        resolvedAt: q.resolvedAt,
         goTo,
       });
     }
@@ -543,6 +591,11 @@ function runDescription(r: Run): string {
 function resultChecks(r: Run, snap: Snapshot): GateCheck[] {
   const checks: GateCheck[] = [];
   const a = r.audit;
+  if (r.kind === "customize_order") {
+    // Run by a human: no audit row and no exit code to check, only the PR and the summary it should leave.
+    const posted = r.transcript?.milestones.some((m) => m.title === "Summary posted" && m.ok) ?? false;
+    return [prOpenCheck(r.pr), { item: "summary posted", ok: posted, note: posted ? "gh pr comment succeeded" : "no summary comment posted" }];
+  }
   checks.push(
     a
       ? { item: "exit code", ok: a.exitCode === 0, note: `exit ${a.exitCode ?? "none"} (audit log)` }

@@ -67,6 +67,7 @@ const pr = (over: Partial<PrInfo>): PrInfo => ({
   labels: [],
   reviews: [],
   commitDates: [],
+  comments: [],
   ...over,
 });
 
@@ -208,7 +209,7 @@ describe("order status", () => {
 
 describe("needs you", () => {
   test("a Verdict: CHANGES review is stuck until a later commit", () => {
-    const review = { state: "COMMENTED", body: "**Verdict: CHANGES**\n\nbad", submittedAt: at(10) };
+    const review = { state: "COMMENTED", body: "**Verdict: CHANGES**\n\nbad", submittedAt: at(10), commit: "head1" };
     const stuck = buildModel(snap({ prs: [pr({ number: 2, branch: "x/y", reviews: [review], commitDates: [at(1)] })] }));
     expect(stuck.details.get(UNLINKED_ID)?.needs.map((n) => [n.kind, n.resolvedAt])).toEqual([["stuck_changes", null]]);
     expect(stuck.details.get(UNLINKED_ID)?.lane_meta["PR #2"]?.title).toBe("PR #2");
@@ -381,5 +382,80 @@ describe("ready for your review", () => {
   test("a ready PR resolves when it is merged", () => {
     const m = buildModel(snap({ tasks, prs: [pr({ state: "MERGED", mergedAt: at(20), reviews: [approve("head1", at(10))] })] }));
     expect(readyOf(m)).toEqual([[at(10), at(20)]]);
+  });
+});
+
+describe("customize_order", () => {
+  const comment = (body: string, createdAt: string) => ({ body, createdAt });
+  const needsOf = (m: ReturnType<typeof buildModel>, id: string) =>
+    m.details.get(id)?.needs.filter((n) => n.kind === "task_change_requested").map((n) => [n.raisedAt, n.resolvedAt]) ?? [];
+
+  test("a run with no audit row is one customize_order block that succeeded, never a failure or a loop stop", () => {
+    const m = buildModel(
+      snap({
+        tasks: [task("a", { status: "pr" })],
+        transcripts: [transcript({ kind: "customize_order", target: "1", mtimeMs: T0 })],
+        prs: [pr({})],
+        now: T0 + 60 * 60_000,
+        loopRunning: true,
+      }),
+    );
+    const d = m.details.get("order-a");
+    expect(d?.phases.map((p) => [p.owner, p.name, p.status])).toEqual([["a", "customize_order", "success"]]);
+    expect(d?.needs.filter((n) => n.kind === "loop_stopped")).toEqual([]);
+    expect(d?.loop_stops).toEqual([]);
+  });
+
+  test("a customize_order run still being written is running, and an unmatched PR gets a PR lane", () => {
+    const m = buildModel(
+      snap({
+        transcripts: [transcript({ kind: "customize_order", target: "7", mtimeMs: T0 + 5 * 60_000 })],
+        prs: [pr({ number: 7, branch: "x/y" })],
+        now: T0 + 6 * 60_000,
+      }),
+    );
+    expect(m.details.get(UNLINKED_ID)?.phases.map((p) => [p.owner, p.status])).toEqual([["PR #7", "running"]]);
+  });
+
+  test("a pending /customize_order comment raises a review need that a later summary resolves", () => {
+    const tasks = [task("a", { status: "pr" })];
+    const request = comment("  /customize_order please add X", at(10));
+    const open = buildModel(snap({ tasks, prs: [pr({ comments: [request] })] }));
+    expect(needsOf(open, "order-a")).toEqual([[at(10), null]]);
+    const need = open.details.get("order-a")?.needs[0];
+    expect(need?.severity).toBe("review");
+    expect(need?.goTo).toEqual({ kind: "pr", url: "https://github.com/o/r/pull/1" });
+    const done = buildModel(
+      snap({ tasks, prs: [pr({ comments: [request, comment("## Customize order summary\n\nchanged", at(25))] })] }),
+    );
+    expect(needsOf(done, "order-a")).toEqual([[at(10), at(25)]]);
+    const again = buildModel(
+      snap({
+        tasks,
+        prs: [pr({ comments: [request, comment("## Customize order summary", at(25)), comment("/customize_order more", at(30))] })],
+      }),
+    );
+    expect(needsOf(again, "order-a")).toEqual([
+      [at(10), at(25)],
+      [at(30), null],
+    ]);
+  });
+
+  test("merging or closing the PR resolves a pending request", () => {
+    const m = buildModel(
+      snap({ tasks: [task("a", { status: "pr" })], prs: [pr({ state: "MERGED", mergedAt: at(40), comments: [comment("/customize_order x", at(10))] })] }),
+    );
+    expect(needsOf(m, "order-a")).toEqual([[at(10), at(40)]]);
+  });
+
+  test("the factory's own comments and look-alike words do not raise it", () => {
+    const comments = [
+      comment("## Remake summary\n\nfixed", at(10)),
+      comment("/remake x", at(11)),
+      comment("/customize_orders", at(12)),
+      comment("please run /customize_order", at(13)),
+    ];
+    const m = buildModel(snap({ tasks: [task("a", { status: "pr" })], prs: [pr({ comments })] }));
+    expect(needsOf(m, "order-a")).toEqual([]);
   });
 });
