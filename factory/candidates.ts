@@ -45,10 +45,8 @@ function rank(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore): Ranki
     ranked.push({ candidate: { kind: "task", task }, sortAt: stamp(task.createdAt), index: ranked.length });
   }
 
-  // A PR on `<type>/<task-id>` belongs to that task; it is not worked on as a separate candidate.
-  const owned = (pr: PullRequest) => tasks.some((t) => pr.branch.endsWith(`/${t.id}`));
+  // Every open PR is a candidate, including the ones cook opened for a task: the factory reviews its own work.
   for (const pr of prs) {
-    if (owned(pr)) continue;
     const action = decidePr(pr, { reviewedSha: attempts.get(pr.number)?.reviewedSha });
     if (action === "none") continue;
     if (attempts.exceeded(pr.number)) {

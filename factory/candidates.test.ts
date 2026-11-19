@@ -71,12 +71,10 @@ describe("pickCandidate", () => {
     expect(idOf(pickCandidate([task("b"), task("a")], [], fakeAttempts()).candidate)).toBe("task:b");
   });
 
-  test("a PR on a task's branch is not its own candidate; an unknown branch is", () => {
-    const tasks = [task("some-task-id", { status: "in_progress" })];
+  test("a PR that cook opened on a task's branch is a candidate like any other", () => {
+    const tasks = [task("some-task-id", { status: "pr" })];
     const owned = pr(1, { branch: "feat/some-task-id" });
-    const unowned = pr(2, { branch: "feat/unknown" });
-    expect(pickCandidate(tasks, [owned], fakeAttempts()).candidate).toBeNull();
-    expect(idOf(pickCandidate(tasks, [owned, unowned], fakeAttempts()).candidate)).toBe("pr:2");
+    expect(pickCandidate(tasks, [owned], fakeAttempts()).candidate).toEqual({ kind: "pr", pr: owned, action: "review" });
   });
 
   test("a PR candidate carries its action", () => {
@@ -137,15 +135,14 @@ describe("rankCandidates", () => {
 
   test("lists tasks and PRs oldest first with unstamped tasks last", () => {
     const ids = rankCandidates(tasks, prs.filter((p) => p.number !== 3), fakeAttempts()).map(idOf);
-    expect(ids).toEqual(["task:owner", "pr:1", "task:late", "task:unstamped"]);
+    expect(ids).toEqual(["task:owner", "pr:1", "pr:2", "task:late", "task:unstamped"]);
   });
 
-  test("omits owned PRs, PRs at the attempt limit and blocked tasks", () => {
+  test("omits PRs at the attempt limit and blocked tasks", () => {
     const ids = rankCandidates(tasks, prs, fakeAttempts({ 3: exceeded })).map(idOf);
-    expect(ids).not.toContain("pr:2");
     expect(ids).not.toContain("pr:3");
     expect(ids).not.toContain("task:blocked");
-    expect(ids).toEqual(["task:owner", "pr:1", "task:late", "task:unstamped"]);
+    expect(ids).toEqual(["task:owner", "pr:1", "pr:2", "task:late", "task:unstamped"]);
   });
 
   test("ties keep original order, tasks before PRs", () => {
