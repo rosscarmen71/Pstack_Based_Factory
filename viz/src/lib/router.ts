@@ -1,18 +1,11 @@
 import { ref } from 'vue'
+import { parseHash, hrefFor, hrefForProject, type Route } from './routes'
 
-// Hash routes: #/ → sessions · #/<adw_id> → waterfall · #/<adw_id>/<phase_id> → phase panel open
-export interface Route {
-  adwId: string | null
-  phaseId: string | null
-}
+export type { Route } from './routes'
+export { hrefFor, hrefForProject } from './routes'
 
 function parse(): Route {
-  const parts = window.location.hash
-    .replace(/^#\/?/, '')
-    .split('/')
-    .filter(Boolean)
-    .map(decodeURIComponent)
-  return { adwId: parts[0] ?? null, phaseId: parts[1] ?? null }
+  return parseHash(window.location.hash)
 }
 
 const route = ref<Route>(parse())
@@ -29,13 +22,10 @@ export function useRoute() {
 // since the phase_id in the URL is not the display name.
 export const phaseCrumb = ref<string | null>(null)
 
-export function hrefFor(adwId?: string | null, phaseId?: string | null): string {
-  let h = '#/'
-  if (adwId) h += encodeURIComponent(adwId)
-  if (adwId && phaseId) h += `/${encodeURIComponent(phaseId)}`
-  return h
-}
-
 export function navigate(adwId?: string | null, phaseId?: string | null): void {
   window.location.hash = hrefFor(adwId, phaseId)
+}
+
+export function navigateProject(name: string): void {
+  window.location.hash = hrefForProject(name)
 }

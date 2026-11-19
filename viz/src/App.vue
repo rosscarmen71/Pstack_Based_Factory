@@ -5,6 +5,7 @@ import { fetchHealth } from './lib/api'
 import type { HealthResponse } from './lib/types'
 import SessionsList from './components/SessionsList.vue'
 import SessionTrace from './components/SessionTrace.vue'
+import ProjectPage from './components/ProjectPage.vue'
 
 const route = useRoute()
 
@@ -44,7 +45,11 @@ const healthErrors = computed(() => Object.entries(health.value?.errors ?? {}))
         </svg>
         <span class="brand">Pstack Based Software Factory</span>
         <span class="sep">›</span>
-        <a :href="hrefFor()" :class="{ current: !route.adwId }">sessions</a>
+        <a :href="hrefFor()" :class="{ current: !route.adwId && route.project === null }">sessions</a>
+        <template v-if="route.project !== null">
+          <span class="sep">›</span>
+          <span class="current">{{ route.project }}</span>
+        </template>
         <template v-if="route.adwId">
           <span class="sep">›</span>
           <a :href="hrefFor(route.adwId)" :class="{ current: !route.phaseId }">{{
@@ -70,7 +75,8 @@ const healthErrors = computed(() => Object.entries(health.value?.errors ?? {}))
       </div>
     </div>
     <main>
-      <SessionsList v-if="!route.adwId" />
+      <ProjectPage v-if="route.project !== null" :key="`p:${route.project}`" :project="route.project" />
+      <SessionsList v-else-if="!route.adwId" />
       <SessionTrace v-else :key="route.adwId" :adw-id="route.adwId" :phase-id="route.phaseId" />
     </main>
   </div>
