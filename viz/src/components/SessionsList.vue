@@ -44,6 +44,44 @@ const ordered = computed(() =>
       (ts(b.started_at) || 0) - (ts(a.started_at) || 0),
   ),
 )
+
+const NO_PROJECT_LABEL = 'No project'
+
+interface Group {
+  name: string | null
+  sessions: OrderSummary[]
+  latest: number
+}
+
+// Sections by project, most recently started project first, "No project" last.
+// Order within a section is the engineer-first order above.
+const groups = computed<Group[]>(() => {
+  const byName = new Map<string | null, Group>()
+  for (const s of ordered.value) {
+    const name = s.project?.trim() ? s.project : null
+    let g = byName.get(name)
+    if (!g) {
+      g = { name, sessions: [], latest: -Infinity }
+      byName.set(name, g)
+    }
+    g.sessions.push(s)
+    const t = ts(s.started_at)
+    if (Number.isFinite(t) && t > g.latest) g.latest = t
+  }
+  return [...byName.values()].toSorted(
+    (a, b) =>
+      Number(a.name === null) - Number(b.name === null) ||
+      b.latest - a.latest ||
+      (a.name ?? '').localeCompare(b.name ?? ''),
+  )
+})
+
+// Every project name in use, for the move-to-project select on each card.
+const projectNames = computed(() =>
+  [...new Set(sessions.value.map((s) => s.project?.trim()).filter((p): p is string => !!p))].toSorted(
+    (a, b) => a.localeCompare(b),
+  ),
+)
 </script>
 
 <template>
@@ -52,14 +90,26 @@ const ordered = computed(() =>
 
     <div v-if="ordered.length" class="list-head dim">{{ ordered.length }} orders</div>
 
-    <div v-if="ordered.length" class="cards">
-      <SessionCard
-        v-for="s in ordered"
-        :key="s.adw_id"
-        :session="s"
-        :now-ms="nowMs"
-      />
-    </div>
+    <template v-if="ordered.length">
+    <section v-for="g in groups" :key="g.name ?? '\0none'" class="group">
+      <h2 class="group-head">
+        <span class="group-name" :class="{ none: g.name === null }" :title="g.name ?? NO_PROJECT_LABEL">{{
+          g.name ?? NO_PROJECT_LABEL
+        }}</span>
+        <span class="group-count dim">{{ g.sessions.length }}</span>
+      </h2>
+      <div class="cards">
+        <SessionCard
+          v-for="s in g.sessions"
+          :key="s.adw_id"
+          :session="s"
+          :now-ms="nowMs"
+          :projects="projectNames"
+          @project-changed="tick"
+        />
+      </div>
+    </section>
+    </template>
     <div v-else-if="loaded" class="empty-state">no orders yet — run take_order to see one here</div>
     <div v-else-if="!apiError" class="empty-state">loading sessions…</div>
   </div>
@@ -76,6 +126,34 @@ const ordered = computed(() =>
   font-size: 16px;
 }
 
+.group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0;
+  padding: 24px 24px 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.group-name.none {
+  color: var(--dim);
+}
+
+.group-count {
+  flex: none;
+  font-size: 16px;
+  font-weight: 400;
+}
+
 .cards {
   /* Uniform grid: every card the same width and (fixed in SessionCard) height,
      independent of content. */
@@ -88,6 +166,10 @@ const ordered = computed(() =>
 @media (max-width: 640px) {
   .cards {
     padding: 12px 16px 24px;
+  }
+
+  .group-head {
+    padding: 16px 16px 0;
   }
 }
 

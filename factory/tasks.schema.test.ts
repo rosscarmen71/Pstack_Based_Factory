@@ -83,6 +83,13 @@ describe("tracking fields", () => {
 });
 
 describe("parseTasks", () => {
+  test("project is optional and must be a non-empty string", () => {
+    expect(bad({ project: "factory smoke tests" })).toEqual([]);
+    expect(bad({ project: "" })).toHaveLength(1);
+    expect(bad({ project: "   " })).toHaveLength(1);
+    expect(bad({ project: 3 })).toHaveLength(1);
+  });
+
   test("returns the tasks or throws with every problem listed", () => {
     expect(parseTasks([valid()])).toHaveLength(1);
     expect(() => parseTasks([valid({ id: "" })])).toThrow("invalid tasks.json");

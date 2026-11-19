@@ -20,6 +20,8 @@ export interface Task {
   lastSkipReason?: string;
   /** The task's own pull request. */
   pr?: TaskPr;
+  /** Name of the project its order is grouped under. Set by take_order, changed from the visualizer. */
+  project?: string;
 }
 
 export interface TaskPr {
@@ -83,6 +85,9 @@ export function validateTasks(raw: unknown): string[] {
     }
     if (o.lastSkipReason !== undefined && (typeof o.lastSkipReason !== "string" || o.lastSkipReason === "")) {
       errors.push(`${at}: lastSkipReason must be a non-empty string`);
+    }
+    if (o.project !== undefined && (typeof o.project !== "string" || o.project.trim() === "")) {
+      errors.push(`${at}: project must be a non-empty string`);
     }
     if (o.pr !== undefined && !isTaskPr(o.pr)) {
       errors.push(`${at}: pr must be {repo: "owner/name", number: positive integer, url: https URL, open: boolean}`);

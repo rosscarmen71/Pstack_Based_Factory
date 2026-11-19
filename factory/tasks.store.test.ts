@@ -87,3 +87,11 @@ test("setStatus throws for an unknown id; load throws for invalid json content",
   writeFileSync(path, JSON.stringify([{ id: "a" }]));
   expect(() => fileStore(path).load()).toThrow("invalid tasks.json");
 });
+test("update with an undefined field removes it from the file", () => {
+  writeFileSync(path, JSON.stringify([{ ...t("a"), project: "Alpha" }, t("b")]));
+  const store = fileStore(path);
+  store.update("a", { project: undefined });
+  const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>[];
+  expect("project" in (saved[0] ?? {})).toBe(false);
+  expect(saved.map((x) => x.id)).toEqual(["a", "b"]);
+});

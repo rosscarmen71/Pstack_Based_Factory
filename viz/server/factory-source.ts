@@ -1,7 +1,8 @@
 /**
  * Gathers a Snapshot of the factory from disk and GitHub, then hands it to the pure model.
- * Reads only, with two exceptions: viz/.needs-history.jsonl, the visualizer's own record of stuck tasks, and the
- * /customize_order agents it starts for PRs with an unanswered request (customize-agent.ts).
+ * Reads only, with these exceptions: viz/.needs-history.jsonl, the visualizer's own record of stuck tasks, the
+ * /customize_order agents it starts for PRs with an unanswered request (customize-agent.ts), and invalidate(), which
+ * index.ts calls after it changes a task's project.
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -303,19 +304,29 @@ export interface Loaded {
 
 let last: { at: number; loaded: Loaded } | null = null;
 let inflight: Promise<Loaded> | null = null;
+let generation = 0;
 const MODEL_TTL_MS = 400;
+
+/** Drops the cached model (and ignores a build already running) so the next load() reads tasks.json again. */
+export function invalidate(): void {
+  generation++;
+  last = null;
+  inflight = null;
+}
 
 /** One model per ~0.4 s, shared by every request in that window. */
 export function load(): Promise<Loaded> {
   const now = Date.now();
   if (last && now - last.at < MODEL_TTL_MS) return Promise.resolve(last.loaded);
-  inflight ??= build(now).finally(() => {
-    inflight = null;
+  const gen = generation;
+  const promise: Promise<Loaded> = build(now, gen).finally(() => {
+    if (inflight === promise) inflight = null;
   });
+  inflight ??= promise;
   return inflight;
 }
 
-async function build(now: number): Promise<Loaded> {
+async function build(now: number, gen: number): Promise<Loaded> {
   const errors: SourceErrors = {};
   let tasks: Task[] = [];
   try {
@@ -352,6 +363,6 @@ async function build(now: number): Promise<Loaded> {
     // History is a convenience; failing to save it never breaks the view.
   }
   const loaded = { model, errors, loopRunning: running, transcriptsDir: TRANSCRIPTS_DIR };
-  last = { at: now, loaded };
+  if (gen === generation) last = { at: now, loaded };
   return loaded;
 }
