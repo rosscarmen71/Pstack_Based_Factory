@@ -1,6 +1,6 @@
 # Pstack Based Factory
 
-A small software factory that relies heavily on [pstack skills](https://github.com/cursor/plugins/tree/main/pstack). A loop picks up tasks, has Claude Code turn each one into a pull request, and reviews or fixes other open PRs.
+A small software factory that relies heavily on [pstack skills](https://github.com/cursor/plugins/tree/main/pstack). You describe what you want; the factory splits it into tasks, has Claude Code turn each task into a pull request, and reviews and fixes those pull requests, several at a time, across as many repositories as you register.
 
 > Also uses some of [Matt Pocock's skills](https://github.com/mattpocock/skills/tree/main), such as `grilling`, `grill_me`, `grill-with-docs` and `domain-modeling`.
 
@@ -22,15 +22,16 @@ A small software factory that relies heavily on [pstack skills](https://github.c
 * [How To **Use** The Factory?](#usage)
 * [How Does It Work?](#how-it-works)
 
-> For more info see [`docs`](docs/README.md)
+> For how it works in depth, with diagrams, see [`docs/README.md`](docs/README.md).
 
 ## What Is The Pstack_Based_Factory?
 
-A loop that turns tasks into pull requests. You add tasks with `/take_order`; the loop picks a ready one,
-runs `/cook` to branch, implement and verify it, and opens a PR. It also reviews and fixes other open PRs with
-`/taste_test` and `/remake`. The work is done by pstack-style skills in `factory/skills/`, run through the Claude Code
-CLI. Merging is always yours; the loop never merges. Watch it with the read-only queue view (`bun run queue`) or the
-live visualizer (`bun run viz`).
+A factory that turns tasks into pull requests. You add tasks with `/take_order` in any repository; that repository
+becomes a project. Each project has a loop that starts agents for whatever is ready, up to three at once: `/cook`
+branches, implements and verifies a task and opens a PR, `/taste_test` reviews a PR, and `/remake` fixes one. Tasks
+that depend on each other run in order; tasks that don't run in parallel. The work is done by pstack-style skills in
+`factory/skills/`, run through the Claude Code CLI. Merging is always yours; the loop never merges. Watch and steer it
+with the live visualizer (`bun run viz`), or read one project's queue with `bun run queue`.
 
 ## Setup
 
@@ -101,6 +102,7 @@ Each project's queue is created empty the first time the project is used. The `f
 - [General Workflow](#general-workflow)
 - [Skills](#skills)
 - [Tasks](#tasks)
+- [Projects](#projects)
 - [The Loop](#the-loop)
 - [Agent Permissions](#agent-permissions)
 - [Result Report](#result-report)
@@ -111,17 +113,21 @@ Each project's queue is created empty the first time the project is used. The `f
 
 ## General Workflow
 
-1. **You add tasks.** Run `/take_order` in Claude Code with a short description of what you want built. It designs
-   the feature with you (`grill-with-docs`), splits it into tasks (`to_tasks`), and appends them to
-   `factory/tasks.json` once you approve.
-2. **The loop picks the next thing to do.** `bun run loop` starts `factory/loop.ts`. Each turn it reads the tasks,
-   lists open PRs with `gh`, and picks one thing to do: a PR that needs a patch, else a PR that needs a review, else a task that may start.
-3. **A task becomes a PR.** The loop runs `claude -p "/cook <task-id>"`. `cook` creates the branch, has
-   `cook_poteto` implement the task, runs the checks, gets an independent verification, and opens the PR.
-4. **Other PRs get reviewed or fixed.** For an open PR that isn't one of the factory's own task PRs, the loop runs
-   `claude -p "/taste_test <pr>"` to review it, or `claude -p "/remake <pr>"` to fix conflicts, failing CI or
-   requested changes.
-5. **You watch.** `bun run queue` serves a read-only page with what's running, what's next and what already ran.
+1. **You add tasks.** In the repository you want work done in, run `/take_order` in Claude Code with a short
+   description of what you want built. It designs the feature with you (`grill-with-docs`), splits it into tasks
+   (`to_tasks`), decides which tasks must wait for which (`task-determine-deps`), and appends them to that
+   repository's task queue once you approve.
+2. **Each project's loop decides what to start.** `bun run loop` runs one loop per project. Every poll, a loop reads
+   its tasks, lists its PRs with `gh`, and starts agents for what is ready until its cap is reached: PRs that need a
+   patch first, then PRs that need a review, then tasks that may start.
+3. **A task becomes a PR.** The loop runs `claude -p "/cook <task-id>"` in a fresh git worktree. `cook` creates the
+   branch, has `cook_poteto` implement the task, runs the checks, gets an independent verification, and opens the PR.
+4. **Every open PR gets reviewed and fixed.** The loop runs `claude -p "/taste_test <pr>"` to review a PR, the
+   factory's own included, and `claude -p "/remake <pr>"` to fix conflicts, failing CI or requested changes.
+5. **You merge.** Merging a task's PR completes the task, which lets the tasks that waited for it start. In
+   hands-off mode they may start earlier, once the PR has passed review.
+6. **You watch and steer.** `bun run viz` shows every project, session and task, and lets you set modes, edit
+   dependencies, retry, complete or delete tasks, and pause.
 
 Merging is always up to you. The loop never merges.
 
@@ -129,6 +135,7 @@ Merging is always up to you. The loop never merges.
 
 - **Run by the loop:** `cook` (task → PR), `taste_test` (review a PR), `remake` (fix a PR).
 - **Run by you:** `take_order` (add tasks), `customize_order` (change a PR's task when a comment asks for it).
+- **Deciding dependencies:** `task-pair-check` judges whether one task must wait for another. `task-determine-deps` uses it inside `take_order`, and `task-update-deps` inside `customize_order`.
 - **Used inside those:** `cook_poteto` does the actual coding, review and fixing. `to_tasks`, `grill-with-docs`, `interrogate` and the `principle-*` skills are read along the way. The rest of `factory/skills/` are general pstack and Matt Pocock skills you can also run yourself.
 
 ### Tasks
@@ -199,7 +206,7 @@ touched beyond closing those tasks' PRs and deleting their branches.
 
 ### The Loop
 
-The loop is a scheduler. Every poll (60 s, and at once whenever an agent finishes) it reads the tasks and the PRs, ranks what is ready, and starts agents until `agentCap` are running (3 by default, set in `factory/settings.json`). It never waits on an agent, so it keeps noticing new tasks and PRs while agents work. The ranking: PRs that need a patch, then PRs that need a review, then ready tasks; within each, the oldest by `createdAt`, and tasks without `createdAt` go last. Two tasks with a dependency between them never run together, because the dependent is not ready until the gate lets it through.
+The loop is a scheduler. Every poll (60 s, and at once whenever an agent finishes) it reads the tasks and the PRs, ranks what is ready, and starts agents until `agentCap` are running (3 by default, set in the visualizer's top bar or in `~/.pstack-factory/settings.json`). It never waits on an agent, so it keeps noticing new tasks and PRs while agents work. The ranking: PRs that need a patch, then PRs that need a review, then ready tasks; within each, the oldest by `createdAt`, and tasks without `createdAt` go last. Two tasks with a dependency between them never run together, because the dependent is not ready until the gate lets it through.
 
 **One worktree per agent.** Each agent runs in its own git worktree in the project's folder under `~/.pstack-factory/`, created from `origin/main` and removed when the run ends, so parallel agents never share a checkout and never touch yours. The repository's installed dependencies (`node_modules`) are linked into it; the skills reach the task queue through the `factory` command. Its transcripts are moved next to the main checkout's when it is removed.
 
@@ -257,13 +264,16 @@ the running loop's pid and start time. A lock left by a killed loop is replaced.
 visualizer (`bun run viz`) runs `/customize_order <pr>` itself, once per comment, through the Claude Agent SDK on your
 Claude Code login, and you answer its questions in the PR's run page, as option cards (the recommended option first, or
 type your own) or in the reply box. If the visualizer is stopped, nothing starts until it runs again, and a run it was
-holding resumes where it left off. Its state is kept in `viz/.customize-agents.json`.
+holding resumes where it left off. Its state is kept in `customize-agents.json` in the project's folder.
 
 ### Agent Permissions
 
 Each run gets `--allowedTools` from `ALLOWED_TOOLS` in `factory/loop.ts`: `Read`, `Edit`, `Write`, `Glob`, `Grep`,
 `Agent` (for the independent verifier subagent), and Bash limited to `git`, `gh`, `bun`, `jq`, `ls`, `cat`, `head`,
-`tail`, `wc`, `sed -n` and `echo`.
+`tail`, `wc`, `sed -n` and `echo`. The factory adds its own `factory` command, which the skills call to find the task
+queue, and passes the project's folder with `--add-dir` so the agent can read that queue. Because Bash is limited to
+`bun` for running checks, a repository whose checks need another tool (`npm`, `pytest`, `cargo`) cannot be built by
+`cook` yet.
 
 ### Result Report
 
@@ -290,8 +300,8 @@ console only. A failed write to the log is reported but never stops the loop.
 
 ### Queue View
 
-`bun run queue` starts a separate, read-only process bound to `127.0.0.1` on `QUEUE_PORT` (default `4040`). It never
-writes anything.
+`bun run queue` starts a separate, read-only process bound to `127.0.0.1` on `QUEUE_PORT` (default `4040`). It shows
+the project of the repository you run it in, and never writes anything.
 
 - `GET /`: an HTML page with running tasks, the ranked queue, and a **History** section showing the latest 100 runs,
   newest first, with a count per outcome. Filter it with `?outcome=success|failure|skip`.
@@ -341,7 +351,7 @@ every half second.
   greyed out and stay for their history.
 
 It writes to the factory's files only through those controls (the projects' task queues, the project list and the settings, all under `~/.pstack-factory/`). Its
-other writes are `viz/.needs-history.jsonl`, its own record of stuck tasks,
+other writes are `needs-history.jsonl` in each project's folder, its own record of stuck tasks,
 and the Terminal window that Take over opens. The first Take over makes macOS ask you to allow controlling Terminal.
 
 ### CI
