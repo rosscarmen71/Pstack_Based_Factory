@@ -4,7 +4,7 @@
 import type { AttemptsStore } from "./pr-attempts.ts";
 import { decidePr } from "./pr-state.ts";
 import type { PullRequest } from "./prs.ts";
-import type { Task } from "./tasks.schema.ts";
+import { isDependencyDone, type Task } from "./tasks.schema.ts";
 
 export type Candidate =
   | { kind: "task"; task: Task }
@@ -36,7 +36,7 @@ interface Ranking {
 }
 
 function rank(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore): Ranking {
-  const done = new Set(tasks.filter((t) => t.status === "pr").map((t) => t.id));
+  const done = new Set(tasks.filter((t) => isDependencyDone(t.status)).map((t) => t.id));
   const ranked: Ranked[] = [];
   const newlyExceeded: PullRequest[] = [];
 

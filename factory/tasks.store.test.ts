@@ -95,3 +95,48 @@ test("update with an undefined field removes it from the file", () => {
   expect("project" in (saved[0] ?? {})).toBe(false);
   expect(saved.map((x) => x.id)).toEqual(["a", "b"]);
 });
+
+test("remove deletes the task and strips it from every dependency list and reason map", () => {
+  writeFileSync(
+    path,
+    JSON.stringify([
+      t("a"),
+      { ...t("b"), dependencies: ["a"], dependencyReasons: { a: "both edit x.ts" } },
+      { ...t("c"), dependencies: ["a", "b"], dependencyReasons: { a: "needs a", b: "needs b" } },
+    ]),
+  );
+  const store = fileStore(path);
+  expect(store.remove("a")).toBe(true);
+  const saved = store.load();
+  expect(saved.map((x) => x.id)).toEqual(["b", "c"]);
+  expect(saved[0]?.dependencies).toEqual([]);
+  expect(saved[0]?.dependencyReasons).toBeUndefined();
+  expect(saved[1]?.dependencies).toEqual(["b"]);
+  expect(saved[1]?.dependencyReasons).toEqual({ b: "needs b" });
+});
+
+test("remove returns false and writes nothing for an unknown id", () => {
+  writeFileSync(path, JSON.stringify([t("a")]));
+  const before = readFileSync(path, "utf8");
+  expect(fileStore(path).remove("nope")).toBe(false);
+  expect(readFileSync(path, "utf8")).toBe(before);
+});
+
+test("complete marks the task completed, stamps completedAt and clears needsYou", () => {
+  writeFileSync(path, JSON.stringify([{ ...t("a"), status: "pr", needsYou: "look at me" }]));
+  const store = fileStore(path);
+  store.complete("a", new Date("2026-11-19T20:00:00.000Z"));
+  const [a] = store.load();
+  expect(a?.status).toBe("completed");
+  expect(a?.completedAt).toBe("2026-11-19T20:00:00.000Z");
+  expect(a?.needsYou).toBeUndefined();
+});
+
+test("completed is final: setStatus and update cannot move it back", () => {
+  writeFileSync(path, JSON.stringify([{ ...t("a"), status: "completed" }]));
+  const store = fileStore(path);
+  expect(() => store.setStatus("a", "pending")).toThrow("final");
+  expect(() => store.update("a", { status: "pr" })).toThrow("final");
+  store.update("a", { runs: 2 });
+  expect(store.load()[0]?.status).toBe("completed");
+});

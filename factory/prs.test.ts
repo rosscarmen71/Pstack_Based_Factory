@@ -149,3 +149,24 @@ test("a missing comments array becomes []", async () => {
 test("asks gh for comments", () => {
   expect(PR_JSON_FIELDS.split(",")).toContain("comments");
 });
+
+test("listClosed asks for closed PRs and tells merged from closed", async () => {
+  const calls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    calls.push(args);
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify([
+        { number: 5, url: "https://github.com/acme/widgets/pull/5", headRefName: "feat/a", createdAt: "2026-11-19T12:00:00Z", mergedAt: "2026-11-19T13:00:00Z" },
+        { number: 6, url: "https://github.com/acme/widgets/pull/6", headRefName: "feat/b", createdAt: "2026-11-19T12:05:00Z", mergedAt: null },
+      ]),
+    };
+  };
+  const closed = await ghPrSource(gh).listClosed?.();
+  expect(calls[0]).toEqual(["pr", "list", "--state", "closed", "--limit", "100", "--json", "number,url,headRefName,createdAt,mergedAt"]);
+  expect(closed?.map((c) => [c.number, c.branch, c.repo, c.merged])).toEqual([
+    [5, "feat/a", "acme/widgets", true],
+    [6, "feat/b", "acme/widgets", false],
+  ]);
+});

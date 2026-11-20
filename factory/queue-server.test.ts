@@ -41,12 +41,19 @@ const fakeStore = (tasks: Task[]): TaskStore => ({
   update: () => {
     throw new Error("the queue server must never write tasks");
   },
+  remove: () => {
+    throw new Error("the queue server must never write tasks");
+  },
+  complete: () => {
+    throw new Error("the queue server must never write tasks");
+  },
 });
 
 /** Counts every call, so tests can assert nothing but reads happened. */
 const fakeAttempts = () => {
   const calls = { write: 0, sync: 0 };
   const store: AttemptsStore = {
+    remove: () => false,
     get: () => undefined,
     record: () => {
       calls.write++;
@@ -106,6 +113,7 @@ const auditEntries = [
 const fakeAudit = (entries: AuditEntry[] | Error = auditEntries) => {
   const calls = { list: 0, record: 0 };
   const store: AuditStore = {
+    purge: () => 0,
     list: () => {
       calls.list++;
       if (entries instanceof Error) throw entries;

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentResult } from "./agent-result.ts";
 import { runLoop, type RunResult, type Runner } from "./loop.ts";
 import type { AttemptsStore } from "./pr-attempts.ts";
-import type { PrSource, PullRequest } from "./prs.ts";
+import type { ClosedPr, PrSource, PullRequest } from "./prs.ts";
 import type { Task, TaskStatus } from "./tasks.schema.ts";
 import type { TaskStore } from "./tasks.store.ts";
 
@@ -26,6 +26,7 @@ const NOOP_ATTEMPTS: AttemptsStore = {
   exceeded: () => false,
   flagForHuman: async () => {},
   sync: () => {},
+  remove: () => false,
 };
 
 /** In-memory store that records every update call. */
@@ -39,6 +40,16 @@ function memStore(tasks: Task[]) {
     update(id, patch) {
       updates.push({ id, patch });
       Object.assign(tasks.find((t) => t.id === id)!, patch);
+    },
+    remove(id) {
+      const i = tasks.findIndex((t) => t.id === id);
+      if (i < 0) return false;
+      tasks.splice(i, 1);
+      for (const t of tasks) t.dependencies = t.dependencies.filter((d) => d !== id);
+      return true;
+    },
+    complete(id) {
+      tasks.find((t) => t.id === id)!.status = "completed";
     },
   };
   return { store, tasks, updates };
@@ -239,5 +250,54 @@ describe("runLoop PR tracking", () => {
     const out = await runLoop(store, ok, (m) => logs.push(m), options(source));
     expect(out.stoppedOn).toBeNull();
     expect(logs.some((m) => m.includes("disk full"))).toBe(true);
+  });
+
+  const closed = (number: number, branch: string, merged: boolean, createdAt = "2026-11-19T12:00:00.000Z"): ClosedPr => ({
+    number,
+    url: `https://github.com/acme/widgets/pull/${number}`,
+    repo: "acme/widgets",
+    branch,
+    createdAt,
+    merged,
+  });
+
+  test("a task whose recorded PR was merged becomes completed", async () => {
+    const { store, tasks } = memStore([{ ...task("A", "pr"), pr: OPEN(9) }]);
+    const source: PrSource = { list: async () => [], listClosed: async () => [closed(9, "feat/A", true)] };
+    const logs: string[] = [];
+    await runLoop(store, ok, (m) => logs.push(m), options(source));
+    expect(tasks[0]?.status).toBe("completed");
+    expect(tasks[0]?.pr?.open).toBe(false);
+    expect(logs.some((m) => m.includes("A -> completed"))).toBe(true);
+  });
+
+  test("a task whose PR was closed without merging is flagged and stays pr", async () => {
+    const { store, tasks } = memStore([{ ...task("A", "pr"), pr: OPEN(9) }]);
+    const source: PrSource = { list: async () => [], listClosed: async () => [closed(9, "feat/A", false)] };
+    await runLoop(store, ok, undefined, options(source, 2));
+    expect(tasks[0]?.status).toBe("pr");
+    expect(tasks[0]?.needsYou).toBe("PR #9 was closed without merging");
+    expect(tasks[0]?.pr?.open).toBe(false);
+  });
+
+  test("a merged PR with another number on the same branch does not complete the task", async () => {
+    const { store, tasks } = memStore([{ ...task("A", "pr"), pr: OPEN(9) }]);
+    const source: PrSource = { list: async () => [], listClosed: async () => [closed(4, "feat/A", true)] };
+    await runLoop(store, ok, undefined, options(source));
+    expect(tasks[0]?.status).toBe("pr");
+  });
+
+  test("with no recorded PR, only a closed PR opened after the task counts", async () => {
+    const { store, tasks } = memStore([{ ...task("A", "pr"), createdAt: "2026-11-19T12:00:00.000Z" }]);
+    const source: PrSource = {
+      list: async () => [],
+      listClosed: async () => [closed(3, "feat/A", true, "2026-11-01T00:00:00.000Z")],
+    };
+    await runLoop(store, ok, undefined, options(source));
+    expect(tasks[0]?.status).toBe("pr");
+    source.listClosed = async () => [closed(12, "feat/A", true, "2026-11-19T12:30:00.000Z")];
+    await runLoop(store, ok, undefined, options(source));
+    expect(tasks[0]?.status).toBe("completed");
+    expect(tasks[0]?.pr?.number).toBe(12);
   });
 });

@@ -1,13 +1,13 @@
 // The factory loop: pick one ready task, hand it to Claude Code running the cook skill, repeat.
-// The loop owns status: pending -> in_progress -> pr. `pr` is terminal.
+// The loop owns status: pending -> in_progress -> pr -> completed (once the PR is merged). `completed` is final.
 
 import { AGENT_RESULT_SCHEMA, parseAgentResult, toAuditOutcome, type AgentResult } from "./agent-result.ts";
 import { auditStore, type AuditAction, type AuditStore } from "./audit-log.ts";
 import { pickCandidate } from "./candidates.ts";
 import { acquireLoopLock, type AcquireOptions } from "./loop-lock.ts";
 import { attemptsStore, type AttemptsStore } from "./pr-attempts.ts";
-import { ghPrSource, type PrSource, type PullRequest } from "./prs.ts";
-import type { Task } from "./tasks.schema.ts";
+import { ghPrSource, type ClosedPr, type PrSource, type PullRequest } from "./prs.ts";
+import { isDependencyDone, type Task } from "./tasks.schema.ts";
 import { fileStore, type TaskStore } from "./tasks.store.ts";
 
 /** Claude Code headless, running the cook skill for one task. `{id}` is substituted. */
@@ -40,9 +40,9 @@ export const AGENT_CMD: string[] = ["claude", "-p", "/cook {id}", "--allowedTool
 export const REVIEW_CMD: string[] = ["claude", "-p", "/taste_test {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
 export const PATCH_CMD: string[] = ["claude", "-p", "/remake {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
 
-/** First pending task whose dependencies have all reached `pr`, else null. */
+/** First pending task whose dependencies have all reached `pr` or `completed`, else null. */
 export function pickNext(tasks: Task[]): Task | null {
-  const done = new Set(tasks.filter((t) => t.status === "pr").map((t) => t.id));
+  const done = new Set(tasks.filter((t) => isDependencyDone(t.status)).map((t) => t.id));
   return tasks.find((t) => t.status === "pending" && t.dependencies.every((d) => done.has(d))) ?? null;
 }
 
@@ -74,10 +74,11 @@ const NO_ATTEMPTS: AttemptsStore = {
   exceeded: () => false,
   flagForHuman: async () => {},
   sync: () => {},
+  remove: () => false,
 };
 
 /** Stands in for the audit log when none is wired, so the loop records nothing by default. */
-const NO_AUDIT: AuditStore = { record: () => {}, list: () => [] };
+const NO_AUDIT: AuditStore = { record: () => {}, list: () => [], purge: () => 0 };
 
 export interface LoopOptions {
   /** Where every task, review and patch run is recorded. Defaults to a no-op. */
@@ -161,8 +162,20 @@ export async function runLoop(
     }
   };
 
-  /** Points each `pr`-status task at its open PR, or marks the recorded PR closed once it leaves the list. */
-  const trackPrs = (tasks: Task[], open: PullRequest[]) => {
+  /** The closed PR that belongs to the task: its recorded PR, else the newest one on its branch opened after it. */
+  const closedPrOf = (task: Task, closed: ClosedPr[]): ClosedPr | undefined => {
+    if (task.pr) return closed.find((c) => c.number === task.pr?.number && c.repo === task.pr.repo);
+    const createdAt = task.createdAt ? Date.parse(task.createdAt) : Number.NEGATIVE_INFINITY;
+    return closed
+      .filter((c) => c.branch.endsWith(`/${task.id}`) && Date.parse(c.createdAt) >= createdAt)
+      .toSorted((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  };
+
+  /**
+   * Follows each `pr`-status task's pull request: points the task at its open PR; completes the task once that PR
+   * is merged; flags it for the engineer when the PR was closed without merging.
+   */
+  const trackPrs = (tasks: Task[], open: PullRequest[], closed: ClosedPr[]) => {
     for (const task of tasks) {
       if (task.status !== "pr") continue;
       const found = open.find((p) => p.branch.endsWith(`/${task.id}`));
@@ -171,8 +184,23 @@ export async function runLoop(
         const cur = task.pr;
         const same = cur?.repo === next.repo && cur.number === next.number && cur.url === next.url && cur.open;
         if (!same) track(task.id, { pr: next });
+        continue;
+      }
+      const gone = closedPrOf(task, closed);
+      const pr = gone ? { repo: gone.repo, number: gone.number, url: gone.url, open: false } : task.pr ? { ...task.pr, open: false } : undefined;
+      if (gone?.merged) {
+        if (pr) track(task.id, { pr });
+        try {
+          store.complete(task.id);
+          log(`${task.id} -> completed (PR #${gone.number} merged)`);
+        } catch (err) {
+          log(`could not complete ${task.id}: ${errMsg(err)}`);
+        }
+      } else if (gone) {
+        const needsYou = `PR #${gone.number} was closed without merging`;
+        if (task.needsYou !== needsYou || task.pr?.open !== false) track(task.id, { pr, needsYou });
       } else if (task.pr?.open) {
-        track(task.id, { pr: { ...task.pr, open: false } });
+        track(task.id, { pr });
       }
     }
   };
@@ -185,7 +213,7 @@ export async function runLoop(
       try {
         open = await prs.list();
         attempts.sync(open);
-        trackPrs(tasks, open);
+        trackPrs(tasks, open, prs.listClosed ? await prs.listClosed() : []);
       } catch (err) {
         log(`could not list PRs, continuing with tasks only: ${errMsg(err)}`);
         open = [];
@@ -260,6 +288,11 @@ export async function runLoop(
       threw = true;
     }
     const { exitCode: code, report } = outcome;
+    // Deleted from the viz while its agent ran: there is no task left to record or advance.
+    if (!store.load().some((t) => t.id === next.id)) {
+      log(`${next.id} was deleted while running; ignoring its result`);
+      continue;
+    }
     if (!threw) {
       recordRun("dev-task", next.id, next.title, outcome, startedAt);
       const runs = (next.runs ?? 0) + 1;

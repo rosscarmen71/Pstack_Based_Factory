@@ -4,10 +4,11 @@
  * /customize_order agents it starts for PRs with an unanswered request (customize-agent.ts), and invalidate(), which
  * index.ts calls after it changes a task's project.
  */
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { auditStore } from "../../factory/audit-log.ts";
+import type { TaskTarget } from "../../factory/delete-task.ts";
 import { MAX_PR_ATTEMPTS } from "../../factory/pr-attempts.ts";
 import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, pendingRequest } from "../../factory/pr-state.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
@@ -47,18 +48,51 @@ interface Cached {
 }
 const transcriptCache = new Map<string, Cached>();
 
-/** Reads the start of a file to decide cheaply whether it is a factory run at all. */
-function headIsRun(path: string): boolean {
+/** Reads the start of a file to find cheaply which factory command it ran; null when it is not a factory run. */
+function headCommand(path: string): ReturnType<typeof runCommand> {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(64 * 1024);
     const n = readSync(fd, buf, 0, buf.length, 0);
     const text = buf.subarray(0, n).toString("utf8");
     // Only whole lines: the last one may be cut mid-JSON at the 64 KB boundary.
-    return runCommand(text.slice(0, text.lastIndexOf("\n") + 1) || text) !== null;
+    return runCommand(text.slice(0, text.lastIndexOf("\n") + 1) || text);
   } finally {
     closeSync(fd);
   }
+}
+
+const headIsRun = (path: string): boolean => headCommand(path) !== null;
+
+/** True when a run of `command` belongs to the target: its cook, or a review, patch or customize of its PR. */
+export function runBelongsTo(command: NonNullable<ReturnType<typeof runCommand>>, target: TaskTarget): boolean {
+  if (command.kind === "cook") return command.target === target.taskId;
+  return target.pr !== undefined && command.target === String(target.pr.number);
+}
+
+/**
+ * Erases the transcripts (and their side folders) of every factory run that belongs to the target.
+ * Only files that start with a factory command are ever touched. Returns how many runs were erased.
+ */
+export function removeRunTranscripts(target: TaskTarget, dir: string = TRANSCRIPTS_DIR): number {
+  if (!existsSync(dir)) return 0;
+  let removed = 0;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".jsonl")) continue;
+    const path = join(dir, name);
+    let command: ReturnType<typeof runCommand> = null;
+    try {
+      command = statSync(path).size > 0 ? headCommand(path) : null;
+    } catch {
+      continue;
+    }
+    if (!command || !runBelongsTo(command, target)) continue;
+    rmSync(path, { force: true });
+    rmSync(path.replace(/\.jsonl$/, ""), { recursive: true, force: true });
+    transcriptCache.delete(path);
+    removed += 1;
+  }
+  return removed;
 }
 
 function readTranscripts(): Transcript[] {

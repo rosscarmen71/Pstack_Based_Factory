@@ -50,6 +50,7 @@ const NOOP_ATTEMPTS: AttemptsStore = {
   exceeded: () => false,
   flagForHuman: async () => {},
   sync: () => {},
+  remove: () => false,
 };
 
 /** In-memory store that records every status transition. */
@@ -63,6 +64,16 @@ function memStore(tasks: Task[]) {
     },
     update(id, patch) {
       Object.assign(tasks.find((t) => t.id === id)!, patch);
+    },
+    remove(id) {
+      const i = tasks.findIndex((t) => t.id === id);
+      if (i < 0) return false;
+      tasks.splice(i, 1);
+      for (const t of tasks) t.dependencies = t.dependencies.filter((d) => d !== id);
+      return true;
+    },
+    complete(id) {
+      tasks.find((t) => t.id === id)!.status = "completed";
     },
   };
   return { store, history, tasks };
@@ -83,6 +94,10 @@ function fakeSleep(after = 1, onCall: (n: number) => void = () => {}) {
 describe("pickNext", () => {
   test("returns the first pending task with no dependencies", () => {
     expect(pickNext([task("A"), task("B")])?.id).toBe("A");
+  });
+
+  test("a completed dependency counts as done", () => {
+    expect(pickNext([task("A", "pending", ["B"]), task("B", "completed")])?.id).toBe("A");
   });
 
   test("waits until every dependency is in pr", () => {
@@ -372,6 +387,7 @@ describe("runLoop audit log", () => {
   function fakeAudit(failWith?: Error) {
     const entries: AuditEntry[] = [];
     const audit: AuditStore = {
+      purge: () => 0,
       record(entry) {
         if (failWith) throw failWith;
         entries.push(entry);
@@ -399,6 +415,22 @@ describe("runLoop audit log", () => {
     };
     await runLoop(store, slow, undefined, { ...fakeSleep(), audit });
     expect(entries[0]!.durationMs).toBeGreaterThanOrEqual(25);
+  });
+
+  test("a task deleted while its agent ran is neither recorded nor advanced, and the loop carries on", async () => {
+    const { store, history } = memStore([task("A"), task("B")]);
+    const { audit, entries } = fakeAudit();
+    const { sleep, signal } = fakeSleep();
+    const logs: string[] = [];
+    const run = async (t: Task) => {
+      if (t.id === "A") store.remove("A");
+      return res(1);
+    };
+    const out = await runLoop(store, run, (m) => logs.push(m), { sleep, signal, audit });
+    expect(logs.some((m) => m.includes("A was deleted while running"))).toBe(true);
+    expect(entries.map((e) => e.target)).toEqual(["B"]);
+    expect(history).toEqual(["A:in_progress", "B:in_progress", "B:pending"]);
+    expect(out.stoppedOn).toBe("B");
   });
 
   test("a failing task records dev-task/failure before the loop stops", async () => {
@@ -557,7 +589,7 @@ describe("runLoop agent result report", () => {
 
   function fakeAudit() {
     const entries: AuditEntry[] = [];
-    const audit: AuditStore = { record: (e) => void entries.push(e), list: () => entries };
+    const audit: AuditStore = { record: (e) => void entries.push(e), list: () => entries, purge: () => 0 };
     return { audit, entries };
   }
 
