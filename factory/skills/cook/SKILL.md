@@ -1,24 +1,31 @@
 ---
 name: cook
-description: Take one task from factory/tasks.json and deliver it as one verified pull request - branch, cook_poteto implementation, CI checks, independent verification, PR
+description: Take one task from the task queue and deliver it as one verified pull request - branch, cook_poteto implementation, CI checks, independent verification, PR
 ---
 
 # Cook
 
-Takes one task and produces one pull request. The input is a task `id` from `factory/tasks.json` (or the task object
+Takes one task and produces one pull request. The input is a task `id` from the task queue (or the task object
 itself). The output is an open PR and its URL.
 
 Cook owns the factory contract: the branch, the checks, the verification and the PR. The coding is done by
 **cook_poteto**. Other skills named here sit beside this one, at `../<name>/SKILL.md` from this skill's folder. Load
 each by reading that file with the Read tool; do not use the Skill tool for them.
 
+**The task queue** is this repository's `tasks.json`. It is kept in the factory's home, not in the repository. Get its
+path by running `~/.pstack-factory/bin/factory tasks-file` in the repository (or in a worktree of it), and use that
+path wherever this skill says "the task queue".
+
 ## Steps
 
-1. **Load the task.** Read the task from `factory/tasks.json` by `id`. Stop and report if it does not exist. The loop
-   only starts a task once every dependency has reached `pr` (PR open, not necessarily merged).
+1. **Load the task.** Read the task from the task queue by `id`. Stop and report if it does not exist. The loop
+   only starts a task once every dependency is met: its task is `completed` (merged into main) or deleted, or, for a
+   hands-off dependency, its open PR has passed taste_test.
 2. **Create a branch.** Run `git fetch origin`. Start from the up-to-date base branch (`origin/main`). If the task has
-   dependencies, their code lives on their unmerged branches (`<type>/<dependency-id>`): branch from the dependency's
-   branch instead, and with several dependencies merge their branches in first. If that merge conflicts, resolve it
+   dependencies, read each one's `status` in the task queue. A dependency that is `completed`, or no longer in
+   the file, is already in `origin/main`: do nothing for it. Any other dependency's code lives on its unmerged branch
+   (`origin/<type>/<dependency-id>`): branch from that branch instead of main, and with several unmerged
+   dependencies merge the others in. The PR still targets main. If that merge conflicts, resolve it
    when the fix is clear; otherwise stop and end the run as `skipped` with the conflicting files as the reason. Create
    `<type>/<task-id>`, where `type` is the Conventional Commit type that fits the task (`feat`, `fix`, `refactor`,
    `docs`, `chore`). Never work on the base branch directly. Note the commit the branch starts from (after any
@@ -116,7 +123,7 @@ Put full logs and long tables in a PR comment and link to it from the body. If a
   this skill's rules.
 - The verdicts come from the fresh subagent, not from you; never change one.
 - Stage specific files, never everything; do not commit unrelated changes.
-- Do not edit `factory/tasks.json`; tasks are added by the take_order skill and `status` is moved by the loop.
+- Do not edit the task queue; tasks are added by the take_order skill and `status` is moved by the loop.
 - An unfixable check failure still opens the PR, marked failing locally. A criterion you know cannot be met before
   verification stops the run with no PR; a criterion the step 6 verifier still marks `fail` after the retries opens
   the PR with that criterion marked failing.

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import type { EventRow, OrderSummary } from '../lib/types'
-import { fetchEvents, setSessionProject } from '../lib/api'
+import { deleteSession, fetchEvents, previewSessionDelete, setMode, type DeletePreview, type TaskMode } from '../lib/api'
 import { fmtDate, ts } from '../lib/format'
 import { agentColor, dotColor, eventLabel } from '../lib/events'
 import { hrefFor } from '../lib/router'
@@ -9,73 +9,57 @@ import { clockLabel, gapLabel, layoutTimeline, type Interval } from '../lib/time
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import PhaseDots from './PhaseDots.vue'
+import ModeSwitch from './ModeSwitch.vue'
+import DeleteConfirm from './DeleteConfirm.vue'
 
-const props = defineProps<{ session: OrderSummary; nowMs: number; projects: string[] }>()
-const emit = defineEmits<{ (e: 'project-changed'): void }>()
+const props = defineProps<{ session: OrderSummary; nowMs: number }>()
+const emit = defineEmits<{ (e: 'changed'): void }>()
 
-// Project control. Synthetic sessions (the buckets for unlinked PRs and undated
-// tasks) are not real runs, so they can't be moved.
-const SYNTHETIC_IDS = ['unlinked-prs', 'tasks-without-a-date']
-const movable = computed(() => !SYNTHETIC_IDS.includes(props.session.adw_id))
-const PROJECT_MAX = 60
-const NEW_PROJECT = '__new__'
-const NO_PROJECT = ''
+// Delete: only a session made of tasks can be deleted, and only after the engineer confirms what goes with it.
+const deletable = computed(() => props.session.task_count > 0)
+const confirming = ref(false)
+const previews = ref<DeletePreview[] | null>(null)
+const deleting = ref(false)
+const deleteError = ref<string | null>(null)
 
-const creating = ref(false)
-const newName = ref('')
-const saving = ref(false)
-const projectError = ref<string | null>(null)
-const nameInput = ref<HTMLInputElement | null>(null)
-
-// The session's own project is always an option, even before the list catches up.
-const options = computed(() => {
-  const cur = props.session.project
-  return cur && !props.projects.includes(cur) ? [...props.projects, cur] : props.projects
-})
-
-async function save(project: string | null) {
-  saving.value = true
-  projectError.value = null
+async function askDelete() {
+  confirming.value = true
+  previews.value = null
+  deleteError.value = null
   try {
-    await setSessionProject(props.session.adw_id, project)
-    creating.value = false
-    newName.value = ''
-    emit('project-changed')
+    previews.value = await previewSessionDelete(props.session.adw_id)
   } catch (err) {
-    projectError.value = err instanceof Error ? err.message : String(err)
+    deleteError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function confirmDelete() {
+  deleting.value = true
+  deleteError.value = null
+  try {
+    await deleteSession(props.session.adw_id)
+    confirming.value = false
+    emit('changed')
+  } catch (err) {
+    deleteError.value = err instanceof Error ? err.message : String(err)
   } finally {
-    saving.value = false
+    deleting.value = false
   }
 }
 
-function onSelect(e: Event) {
-  const el = e.target as HTMLSelectElement
-  const value = el.value
-  if (value === NEW_PROJECT) {
-    // Snap the select back; the text input takes over until saved or cancelled.
-    el.value = props.session.project ?? NO_PROJECT
-    creating.value = true
-    projectError.value = null
-    void nextTick(() => nameInput.value?.focus())
-    return
+// Mode: set on the session itself, or cleared so it inherits from its project.
+const modeBusy = ref(false)
+const modeError = ref<string | null>(null)
+async function changeMode(mode: TaskMode | null) {
+  modeBusy.value = true
+  try {
+    await setMode('sessions', props.session.adw_id, mode)
+    emit('changed')
+  } catch (err) {
+    modeError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    modeBusy.value = false
   }
-  void save(value === NO_PROJECT ? null : value)
-}
-
-function commitNew() {
-  const name = newName.value.trim()
-  if (!name) return
-  if (name === props.session.project) {
-    creating.value = false
-    return
-  }
-  void save(name)
-}
-
-function cancelNew() {
-  creating.value = false
-  newName.value = ''
-  projectError.value = null
 }
 
 // Each card tails its own event stream: one full fetch on mount, then the
@@ -277,11 +261,30 @@ const hiddenRowCount = computed(() =>
 </script>
 
 <template>
-  <a class="card" :class="session.order_status" :href="hrefFor(session.adw_id)">
+  <a class="card" :class="[session.order_status, { completed: session.completed }]" :href="hrefFor(session.adw_id)">
+    <button
+      v-if="deletable"
+      type="button"
+      class="card-x"
+      title="Delete this session and all its tasks"
+      aria-label="Delete session"
+      @click.prevent.stop="askDelete"
+    >
+      ×
+    </button>
+    <DeleteConfirm
+      v-if="confirming"
+      class="card-confirm"
+      :previews="previews"
+      :busy="deleting"
+      :error="deleteError"
+      @confirm="confirmDelete"
+      @cancel="confirming = false"
+    />
     <span
       v-if="session.needs_open > 0"
       class="needs-pill"
-      :class="session.needs_broken > 0 ? 'broken' : 'review'"
+      :class="[session.needs_broken > 0 ? 'broken' : 'review', { shifted: deletable }]"
       title="Open items waiting on you in this order"
       >needs you: {{ session.needs_open }}</span
     >
@@ -355,43 +358,9 @@ const hiddenRowCount = computed(() =>
       <StatChip kind="tokens" :value="session.total_tokens" />
     </div>
 
-    <!-- The card is a link: every event in the control is kept from reaching it. -->
-    <div
-      v-if="movable"
-      class="project-ctl"
-      @click.prevent.stop
-      @mousedown.stop
-      @keydown.stop
-      @keyup.stop
-    >
-      <span class="project-label dim">project</span>
-      <input
-        v-if="creating"
-        ref="nameInput"
-        v-model="newName"
-        class="project-input"
-        type="text"
-        :maxlength="PROJECT_MAX"
-        placeholder="new project name"
-        :disabled="saving"
-        aria-label="New project name"
-        @keydown.enter.prevent="commitNew"
-        @keydown.esc.prevent="cancelNew"
-      />
-      <select
-        v-else
-        class="project-select"
-        :value="session.project ?? NO_PROJECT"
-        :disabled="saving"
-        aria-label="Project"
-        @change="onSelect"
-      >
-        <option :value="NO_PROJECT">No project</option>
-        <option v-for="name in options" :key="name" :value="name">{{ name }}</option>
-        <option :value="NEW_PROJECT">New project…</option>
-      </select>
-      <span v-if="projectError" class="project-error" :title="projectError">{{ projectError }}</span>
-      <span v-else-if="creating" class="project-hint faint">Enter saves · Esc cancels</span>
+    <div v-if="session.mode" class="mode-ctl">
+      <ModeSwitch :info="session.mode" :busy="modeBusy" compact @set="changeMode" />
+      <span v-if="modeError" class="mode-error" :title="modeError">{{ modeError }}</span>
     </div>
   </a>
 </template>
@@ -416,6 +385,50 @@ const hiddenRowCount = computed(() =>
   transition:
     border-color 0.18s ease,
     transform 0.18s ease;
+}
+
+/* The delete control: small, top-right, quiet until hovered. */
+.card-x {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--faint);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.card-x:hover {
+  border-color: var(--red-line);
+  color: var(--red);
+}
+
+.card-confirm {
+  position: absolute;
+  top: 44px;
+  left: 14px;
+  right: 14px;
+  z-index: 3;
+}
+
+/* A fully completed session steps back: it is history. */
+.card.completed {
+  opacity: 0.6;
+}
+
+.card.completed:hover {
+  opacity: 1;
+}
+
+.needs-pill.shifted {
+  right: 50px;
 }
 
 .needs-pill {
@@ -648,61 +661,21 @@ const hiddenRowCount = computed(() =>
   gap: 12px;
 }
 
-.project-ctl {
+.mode-ctl {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
   cursor: default;
-  font-size: 16px;
 }
 
-.project-label {
-  flex: none;
-}
-
-.project-select,
-.project-input {
+.mode-error {
   min-width: 0;
-  flex: 1;
-  max-width: 260px;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-3);
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
-}
-
-.project-input {
-  cursor: text;
-}
-
-.project-select:hover,
-.project-select:focus,
-.project-input:focus {
-  border-color: var(--faint);
-  outline: none;
-}
-
-.project-select:disabled,
-.project-input:disabled {
-  opacity: 0.6;
-}
-
-.project-hint,
-.project-error {
-  flex: none;
-  max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-}
-
-.project-error {
   color: var(--red);
+  font-size: 14px;
 }
 </style>

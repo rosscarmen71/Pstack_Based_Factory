@@ -56,8 +56,13 @@ export function fileStore(path: string = TASKS_PATH): TaskStore {
       const rest = tasks
         .filter((t) => t.id !== id)
         .map((t) => {
-          if (!t.dependencies.includes(id)) return t;
+          if (!t.dependencies.includes(id) && !(t.builtOn && id in t.builtOn)) return t;
           const next: Task = { ...t, dependencies: t.dependencies.filter((d) => d !== id) };
+          if (t.builtOn) {
+            const { [id]: _base, ...builtOn } = t.builtOn;
+            if (Object.keys(builtOn).length > 0) next.builtOn = builtOn;
+            else delete next.builtOn;
+          }
           if (t.dependencyReasons) {
             const { [id]: _gone, ...reasons } = t.dependencyReasons;
             if (Object.keys(reasons).length > 0) next.dependencyReasons = reasons;

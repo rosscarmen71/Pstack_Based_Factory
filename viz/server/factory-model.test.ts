@@ -1,8 +1,12 @@
+import { DEFAULT_SETTINGS } from "../../factory/settings.ts";
 import { describe, expect, test } from "bun:test";
 import type { AuditEntry } from "../../factory/audit-log.ts";
 import type { Task } from "../../factory/tasks.schema.ts";
 import {
   buildModel,
+  depState,
+  isBucketId,
+  ordersOf,
   groupOrders,
   milestoneFor,
   runStatus,
@@ -85,6 +89,91 @@ const snap = (over: Partial<Snapshot>): Snapshot => ({
   ...over,
 });
 
+describe("task info for the controls", () => {
+  const HANDS_OFF = { ...DEFAULT_SETTINGS, defaultMode: "hands-off" as const };
+
+  test("each task lane carries its state, mode and dependencies with reasons and what they wait for", () => {
+    const m = buildModel(
+      snap({
+        tasks: [
+          task("a", { status: "pr", session: "s1" }),
+          task("b", { session: "s1", dependencies: ["a", "gone"], dependencyReasons: { a: "both edit x.ts" }, mode: "hands-off" }),
+          task("c", { session: "s1", needsYou: "cook failed (exit 1)", attempts: 2 }),
+        ],
+      }),
+    );
+    const meta = m.details.get("s1")!.lane_meta;
+    expect(meta.b?.task).toEqual({
+      id: "b",
+      status: "pending",
+      needsYou: null,
+      attempts: 0,
+      mode: { mode: "hands-off", from: "task", own: "hands-off", inherited: "hands-on" },
+      dependencies: [
+        { id: "a", reason: "both edit x.ts", met: false, text: "waiting on a to merge" },
+        { id: "gone", reason: null, met: true, text: null },
+      ],
+    });
+    expect(meta.c?.task).toMatchObject({ needsYou: "cook failed (exit 1)", attempts: 2 });
+  });
+
+  test("what a dependency waits for follows the dependency's own mode", () => {
+    const tasks = new Map([
+      ["built", task("built", { status: "pr" })],
+      ["todo", task("todo")],
+      ["done", task("done", { status: "completed" })],
+      ["stuck", task("stuck", { status: "pr", needsYou: "PR #7 was closed without merging" })],
+    ]);
+    expect(depState("built", null, tasks, DEFAULT_SETTINGS).text).toBe("waiting on built to merge");
+    expect(depState("built", null, tasks, HANDS_OFF).text).toBe("waiting on taste_test of built");
+    expect(depState("todo", null, tasks, HANDS_OFF).text).toBe("waiting on todo to be built");
+    expect(depState("done", "r", tasks, DEFAULT_SETTINGS)).toEqual({ id: "done", reason: "r", met: true, text: null });
+    expect(depState("stuck", null, tasks, HANDS_OFF).text).toBe("waiting on you: stuck: PR #7 was closed without merging");
+  });
+
+  test("a session reports its mode, its task count and whether every task is completed", () => {
+    const m = buildModel(
+      snap({
+        tasks: [
+          task("a", { status: "completed", session: "s1", project: "p" }),
+          task("b", { status: "completed", session: "s1", project: "p" }),
+          task("c", { session: "s2", project: "p" }),
+          task("old", { createdAt: at(0) }),
+        ],
+        settings: { ...DEFAULT_SETTINGS, projects: { p: "hands-off" }, sessions: { s2: "hands-on" } },
+      }),
+    );
+    const by = (id: string) => m.sessions.find((s) => s.adw_id === id)!;
+    expect(by("s1")).toMatchObject({ completed: true, task_count: 2, mode: { mode: "hands-off", from: "project", own: null, inherited: "hands-off" } });
+    expect(by("s2")).toMatchObject({ completed: false, task_count: 1, mode: { mode: "hands-on", from: "session", own: "hands-on", inherited: "hands-off" } });
+    // An older order with no stored session id cannot carry a mode of its own.
+    expect(by("order-old").mode).toBeNull();
+  });
+});
+
+describe("a snapshot of a named project", () => {
+  test("every session reports the project, and the catch-all buckets carry it in their id", () => {
+    const m = buildModel(
+      snap({
+        projectName: "acme/api",
+        tasks: [task("a", { session: "s1" }), task("old", { createdAt: undefined })],
+        audit: [audit({ action: "review", target: 2 })],
+        transcripts: [transcript({ kind: "taste_test", target: "2" })],
+        prs: [pr({ number: 2, branch: "refactor/x" })],
+      }),
+    );
+    expect(m.sessions.map((s) => [s.adw_id, s.project]).toSorted()).toEqual([
+      ["s1", "acme/api"],
+      ["tasks-without-a-date@acme/api", "acme/api"],
+      ["unlinked-prs@acme/api", "acme/api"],
+    ]);
+    expect(isBucketId("unlinked-prs@acme/api")).toBe(true);
+    expect(isBucketId("tasks-without-a-date")).toBe(true);
+    expect(isBucketId("s1")).toBe(false);
+    expect(ordersOf([task("old", { createdAt: undefined })], "acme/api")[0]?.id).toBe("tasks-without-a-date@acme/api");
+  });
+});
+
 describe("orders", () => {
   test("neighbours within 5 minutes form one order titled by its first task", () => {
     const orders = groupOrders([task("a", { createdAt: at(0) }), task("b", { createdAt: at(1) }), task("c", { createdAt: at(30) })]);
@@ -151,9 +240,9 @@ describe("waterfall", () => {
     const detail = m.details.get("order-a")!;
     expect(detail.phases.map((p) => [p.owner, p.name, p.status, p.description])).toEqual([
       ["a", "cook", "success", "PR #1 opened"],
-      ["b", "cook", "queued", "waiting on z (other order)"],
+      ["b", "cook", "queued", "waiting on a, z (other order)"],
     ]);
-    expect(detail.lane_meta.b).toEqual({ title: "b", subtitle: "needs a, z (other order)" });
+    expect(detail.lane_meta.b).toMatchObject({ title: "b", subtitle: "needs a, z (other order)" });
   });
 
   test("a review on a PR that matches no task lands in the Unlinked PRs order, on its own lane", () => {
@@ -518,7 +607,7 @@ describe("customize_order", () => {
     const m = buildModel(
       snap({ tasks: [task("a", { status: "pr" })], transcripts: [transcript({ target: "a" })], prs: [pr({})] }),
     );
-    expect(m.details.get("order-a")?.lane_meta.a?.pr).toEqual({ number: 1, url: "https://github.com/o/r/pull/1" });
+    expect(m.details.get("order-a")?.lane_meta.a?.pr).toMatchObject({ number: 1, url: "https://github.com/o/r/pull/1" });
   });
 
   test("merging or closing the PR resolves a pending request", () => {

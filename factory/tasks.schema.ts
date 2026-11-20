@@ -43,6 +43,8 @@ export interface Task {
   needsYou?: string;
   /** ISO 8601 timestamp of when the task became completed. */
   completedAt?: string;
+  /** Head commit of each unmerged dependency this task was last built on or updated to, by dependency id. */
+  builtOn?: Record<string, string>;
 }
 
 export interface TaskPr {
@@ -132,6 +134,11 @@ export function validateTasks(raw: unknown): string[] {
           if (typeof reason !== "string" || reason.trim() === "") errors.push(`${at}: the reason for "${dep}" must be a non-empty string`);
         }
       }
+    }
+    if (o.builtOn !== undefined) {
+      const b = o.builtOn;
+      const ok = typeof b === "object" && b !== null && !Array.isArray(b) && Object.values(b).every((v) => typeof v === "string" && v !== "");
+      if (!ok) errors.push(`${at}: builtOn must be an object of dependency id to commit SHA`);
     }
     if (o.pr !== undefined && !isTaskPr(o.pr)) {
       errors.push(`${at}: pr must be {repo: "owner/name", number: positive integer, url: https URL, open: boolean}`);

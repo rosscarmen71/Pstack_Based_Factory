@@ -12,6 +12,10 @@ Remake owns the factory contract: every `gh` call, the base merge, the checks, t
 result. The fixing is done by **cook_poteto**. Other skills named here sit beside this one, at `../<name>/SKILL.md`
 from this skill's folder. Load each by reading that file with the Read tool; do not use the Skill tool for them.
 
+**The task queue** is this repository's `tasks.json`. It is kept in the factory's home, not in the repository. Get its
+path by running `~/.pstack-factory/bin/factory tasks-file` in the repository (or in a worktree of it), and use that
+path wherever this skill says "the task queue".
+
 ## Steps
 
 1. **Check out the PR branch.** Run `gh pr checkout <pr>` and make sure the branch is up to date with its remote. Stop
@@ -21,20 +25,25 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
    - Failing CI: `gh pr checks <pr>`, then `gh run view <run-id> --log-failed` for each failing run. Keep the failing
      command and a short log excerpt.
    - Merge conflicts: `mergeable` from `gh pr view <pr> --json mergeable,baseRefName`.
+   - Dependencies that moved: if the task (below) has `builtOn` in the task queue, then for each dependency id
+     in it, find its branch `origin/<type>/<dependency-id>` after `git fetch origin`. If the branch still exists and
+     `git log HEAD..origin/<type>/<dependency-id>` is not empty, that dependency has commits this PR lacks.
    - Review items: the latest review that requests changes, or taste_test's `Verdict: CHANGES` comment; unresolved
      review threads; every comment that starts with `/remake` and was posted after the last `## Remake summary`
      comment (each one is an engineer's change request); and other PR comments that ask for a change
      (`gh pr view <pr> --comments`). Skip items an earlier remake summary comment marked fixed or declined, unless
      someone replied after it.
-   - The task, if the head branch is `<type>/<task-id>` and that id exists in `factory/tasks.json`.
+   - The task, if the head branch is `<type>/<task-id>` and that id exists in the task queue.
 
    If nothing is wrong, remove the `changes-requested` label if the PR has it
    (`gh pr edit <pr> --remove-label changes-requested`), then end the run as `skipped`; there is nothing to push.
    If a `/remake` request was pending, first post the step 6 summary comment saying why nothing changed, so the
    request counts as answered and the loop does not run remake on it again.
-3. **Merge the base.** If the PR conflicts, run `git fetch origin`, then `git merge origin/<base>`. Leave the
-   conflicted files as they are for cook_poteto; do not resolve them yourself. Never rebase. If the merge completes
-   cleanly, it commits itself; that is expected.
+3. **Merge the base and moved dependencies.** If the PR conflicts, run `git fetch origin`, then
+   `git merge origin/<base>`. Then, for each dependency that moved, run `git merge origin/<type>/<dependency-id>`, one
+   at a time. Leave the conflicted files as they are for cook_poteto; do not resolve them yourself. Never rebase. If a
+   merge completes cleanly, it commits itself; that is expected. A merge that brought in a moved dependency counts as
+   a change to push, and the task's acceptance criteria must be re-checked in step 4.
 4. **Fix through cook_poteto.** Read `../cook_poteto/SKILL.md` and follow it with this brief. Its rules apply only
    while it runs; when it returns, continue here under this skill's rules. The brief:
    - The PR number, the branch (checked out), `<start-sha>`, and the task's `title`, `description` and
@@ -95,7 +104,7 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
 - Never edit or stage files yourself; the fixing is cook_poteto's. When a check or verdict fails, hand it back to
   cook_poteto. Your only commit is a clean base merge.
 - Post exactly one comment per run, the summary; do not reply on threads.
-- Do not edit `factory/tasks.json`.
+- Do not edit the task queue.
 - The loop reads exit 0 with `processed` as "patched and pushed". You cannot set the exit code yourself, so whenever
   the run ends without a push, end with `skipped` and a reason, starting the reason with `failed:` when something
   went wrong.

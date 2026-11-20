@@ -3,6 +3,7 @@ import type { AuditEntry, AuditStore } from "./audit-log";
 import type { AttemptsStore } from "./pr-attempts";
 import type { PrSource, PullRequest } from "./prs";
 import { startQueueServer } from "./queue-server";
+import { DEFAULT_SETTINGS } from "./settings.ts";
 import type { Task } from "./tasks.schema";
 import type { TaskStore } from "./tasks.store";
 
@@ -134,6 +135,7 @@ function start(opts: { prs: PrSource; attempts?: AttemptsStore; now?: () => Date
     attempts: opts.attempts ?? fakeAttempts().store,
     audit: opts.audit ?? fakeAudit([]).store,
     now: opts.now,
+    settings: () => DEFAULT_SETTINGS,
   });
   servers.push(server);
   return { server, url: `http://127.0.0.1:${server.port}` };
@@ -147,7 +149,7 @@ describe("startQueueServer", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const html = await res.text();
-    const order = ["a-task", "#7", "b-task"].map((ref) => html.indexOf(`<code>${ref}</code>`));
+    const order = ["#7", "a-task", "b-task"].map((ref) => html.indexOf(`<code>${ref}</code>`));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
@@ -160,8 +162,8 @@ describe("startQueueServer", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     const body = (await res.json()) as { running: Task[]; queue: Array<{ position: number; ref: string; kind: string }>; error?: string };
     expect(body.queue.map((q) => [q.position, q.kind, q.ref])).toEqual([
-      [1, "dev-task", "a-task"],
-      [2, "review", "#7"],
+      [1, "review", "#7"],
+      [2, "dev-task", "a-task"],
       [3, "dev-task", "b-task"],
     ]);
     expect(body.running.map((t) => t.id)).toEqual(["running-task"]);

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, hrefFor, phaseCrumb } from './lib/router'
 import { fetchHealth } from './lib/api'
 import type { HealthResponse } from './lib/types'
+import FactoryBar from './components/FactoryBar.vue'
 import SessionsList from './components/SessionsList.vue'
 import SessionTrace from './components/SessionTrace.vue'
 
@@ -57,6 +58,7 @@ const healthErrors = computed(() => Object.entries(health.value?.errors ?? {}))
         </template>
       </nav>
       <span class="status-hints">
+        <FactoryBar />
         <span class="live-hint" :title="loopRunning ? 'factory/loop.ts is running' : 'No loop process is running'">
           <span class="loop-dot" :class="{ on: loopRunning }" />
           loop: {{ loopRunning ? 'running' : 'not running' }}

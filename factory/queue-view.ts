@@ -5,6 +5,7 @@ import { rankCandidates } from "./candidates.ts";
 import type { AttemptsStore } from "./pr-attempts.ts";
 import { escapeHtml, renderPrRef } from "./pr-link.ts";
 import type { PullRequest } from "./prs.ts";
+import { DEFAULT_SETTINGS, type Settings } from "./settings.ts";
 import type { Task } from "./tasks.schema.ts";
 
 export type QueueKind = "dev-task" | "review" | "patch";
@@ -37,8 +38,8 @@ export interface RenderOptions {
   now?: Date;
 }
 
-export function buildQueue(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore): QueueView {
-  const queue = rankCandidates(tasks, prs, attempts).map((c, i): QueueItem => {
+export function buildQueue(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore, settings: Settings = DEFAULT_SETTINGS): QueueView {
+  const queue = rankCandidates(tasks, prs, attempts, settings).map((c, i): QueueItem => {
     if (c.kind === "task") {
       return { position: i + 1, kind: "dev-task", ref: c.task.id, title: c.task.title, createdAt: c.task.createdAt, skips: c.task.skips };
     }

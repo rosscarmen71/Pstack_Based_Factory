@@ -56,11 +56,11 @@ describe("buildQueue", () => {
     ];
     const { queue } = buildQueue(tasks, prs, fakeAttempts());
     expect(queue.map((q) => [q.kind, q.ref, q.title])).toEqual([
-      ["dev-task", "a", "title a"],
-      ["review", "#1", "pr 1"],
       ["patch", "#2", "pr 2"],
+      ["review", "#1", "pr 1"],
+      ["dev-task", "a", "title a"],
     ]);
-    expect(queue[0]?.createdAt).toBe("2026-10-29T10:00:00Z");
+    expect(queue[2]?.createdAt).toBe("2026-10-29T10:00:00Z");
   });
 
   test("positions are 1-based and follow loop order", () => {
@@ -108,7 +108,7 @@ describe("renderQueueHtml", () => {
   test("marks only the first row as next up", () => {
     const html = renderQueueHtml(sample(), { now: NOW });
     expect(html.match(/next up/g)?.length).toBe(1);
-    const firstRow = html.split("<tr").find((r) => r.includes("title a")) ?? "";
+    const firstRow = html.split("<tr").find((r) => r.includes("pr 3")) ?? "";
     expect(firstRow).toContain("next up");
   });
 

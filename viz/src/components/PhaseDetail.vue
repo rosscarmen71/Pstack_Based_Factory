@@ -44,7 +44,7 @@ const props = defineProps<{
   envelopes: Envelope[]
   gates: GateResult[]
   /** The lane's pull request, when it has one. */
-  pr: { number: number; url: string } | null
+  pr: { number: number; url: string; repo?: string } | null
   /** Kind of the newest open need on this block; decides what the panel focuses when it opens. */
   focusKind: NeedKind | null
   /** Bumped when the block is clicked, so focus is re-applied even if this panel is already open. */
@@ -421,7 +421,7 @@ function stopCustomize() {
 
 async function pollCustomize(gen: number, pr: number) {
   try {
-    const s = await getCustomize(pr)
+    const s = await getCustomize(pr, props.pr?.repo)
     if (gen !== czGen) return
     cz.value = s
     czError.value = null
@@ -508,7 +508,7 @@ async function submitAnswers() {
   submitting.value = true
   submitError.value = null
   try {
-    await answerCustomize(props.pr.number, { id: p.id, answers })
+    await answerCustomize(props.pr.number, { id: p.id, answers }, props.pr.repo)
     sentId.value = p.id
   } catch (err) {
     submitError.value = err instanceof Error ? err.message : String(err)
@@ -523,7 +523,7 @@ async function sendReply() {
   replySending.value = true
   replyNote.value = null
   try {
-    await replyCustomize(props.pr.number, { text })
+    await replyCustomize(props.pr.number, { text }, props.pr.repo)
     replyText.value = ''
     replyNote.value = { kind: 'ok', text: 'sent' }
   } catch (err) {

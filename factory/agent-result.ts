@@ -57,3 +57,35 @@ export function toAuditOutcome(exitCode: number, report: AgentResult | null): { 
   if (report.outcome === "skipped") return { outcome: "skip", reason: report.reason };
   return { outcome: "success" };
 }
+
+/** An agent run that ended because the account's usage limit was reached. */
+export interface UsageLimit {
+  /** When the limit resets, epoch ms; null when the message does not say. */
+  resetAt: number | null;
+}
+
+const LIMIT_WITH_EPOCH = /usage limit reached\|(\d{9,13})/i;
+const LIMIT_TEXT = /usage limit reached|you(?:'|\u2019)ve hit your (?:usage |session |weekly )?limit|rate limit(?:ed| exceeded| reached)/i;
+
+/**
+ * Recognises a usage-limit failure in the agent's output: the JSON envelope's error text, or the raw text when
+ * there is no envelope. Null for any other outcome, including a successful run that merely mentions limits.
+ */
+export function parseUsageLimit(stdout: string): UsageLimit | null {
+  let text = stdout;
+  try {
+    const envelope = JSON.parse(stdout) as { is_error?: unknown; result?: unknown };
+    if (typeof envelope === "object" && envelope !== null) {
+      if (envelope.is_error !== true) return null;
+      text = typeof envelope.result === "string" ? envelope.result : "";
+    }
+  } catch {
+    // Not an envelope: judge the raw output.
+  }
+  const withEpoch = LIMIT_WITH_EPOCH.exec(text);
+  if (withEpoch) {
+    const n = Number(withEpoch[1]);
+    return { resetAt: n < 1e12 ? n * 1000 : n };
+  }
+  return LIMIT_TEXT.test(text) ? { resetAt: null } : null;
+}

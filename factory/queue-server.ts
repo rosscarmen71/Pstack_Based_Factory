@@ -3,10 +3,12 @@
 
 import { type AuditStore, auditStore } from "./audit-log.ts";
 import { buildHistory, type HistoryView, HISTORY_CSS, type OutcomeFilter, parseOutcomeFilter, renderHistoryHtml } from "./history-view.ts";
-import { type AttemptsStore, attemptsStore } from "./pr-attempts.ts";
-import { ghPrSource, type PrSource, type PullRequest } from "./prs.ts";
+import type { AttemptsStore } from "./pr-attempts.ts";
+import { projectContext, registerRepo } from "./projects.ts";
+import type { PrSource, PullRequest } from "./prs.ts";
 import { BANNER_CSS, buildQueue, renderQueueHtml } from "./queue-view.ts";
-import { fileStore, type TaskStore } from "./tasks.store.ts";
+import { DEFAULT_SETTINGS, type Settings, settingsStore } from "./settings.ts";
+import type { TaskStore } from "./tasks.store.ts";
 
 export const DEFAULT_QUEUE_PORT = 4040;
 export const PR_CACHE_MS = 10_000;
@@ -22,6 +24,8 @@ export interface QueueServerOptions {
   now?: () => Date;
   /** Read per request, never written. Defaults to the real audit log. */
   audit?: AuditStore;
+  /** Read per request, never written. Defaults to the real settings file. */
+  settings?: () => Settings;
 }
 
 interface PrListing {
@@ -38,6 +42,15 @@ function withHistory(queueHtml: string, section: string, needsBannerCss: boolean
 export function startQueueServer(opts: QueueServerOptions) {
   const now = opts.now ?? (() => new Date());
   const audit = opts.audit ?? auditStore();
+  const loadSettings = opts.settings ?? (() => settingsStore().load());
+  /** Unreadable settings must not take the view down: fall back to the defaults. */
+  const readSettings = (): Settings => {
+    try {
+      return loadSettings();
+    } catch {
+      return DEFAULT_SETTINGS;
+    }
+  };
   let cached: { at: number; listing: PrListing } | undefined;
 
   async function listPrs(): Promise<PrListing> {
@@ -78,7 +91,7 @@ export function startQueueServer(opts: QueueServerOptions) {
       }
       try {
         const { prs, error } = await listPrs();
-        const view = buildQueue(opts.store.load(), prs, opts.attempts);
+        const view = buildQueue(opts.store.load(), prs, opts.attempts, readSettings());
         if (path === "/api/queue") return Response.json(error ? { ...view, error } : view);
         const queueHtml = renderQueueHtml(view, { prError: error, now: now() });
         const history = readHistory(outcome);
@@ -99,11 +112,14 @@ function parsePort(raw: string | undefined): number {
 }
 
 if (import.meta.main) {
+  // The queue of the repository this is run in.
+  const ctx = projectContext(await registerRepo(process.cwd()));
   const server = startQueueServer({
     port: parsePort(process.env.QUEUE_PORT),
-    store: fileStore(),
-    prs: ghPrSource(),
-    attempts: attemptsStore(),
+    store: ctx.store,
+    prs: ctx.prs,
+    attempts: ctx.attempts,
+    audit: ctx.audit,
   });
-  console.log(`queue view on http://${server.hostname}:${server.port}/`);
+  console.log(`queue view for ${ctx.project.name} on http://${server.hostname}:${server.port}/`);
 }

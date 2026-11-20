@@ -71,7 +71,8 @@ function requestTime(pr: PullRequest): string | undefined {
   return best;
 }
 
-export function attemptsStore(path: string = PR_ATTEMPTS_PATH): AttemptsStore {
+/** `defaultGh` is the gh used to flag a PR when the caller passes none: a project's store runs it in that project's checkout. */
+export function attemptsStore(path: string = PR_ATTEMPTS_PATH, defaultGh: GhRunner = bunGh): AttemptsStore {
   const key = (pr: number) => String(pr);
   const update = (pr: number, fn: (e: PrAttempts) => void) => {
     const entries = readEntries(path);
@@ -96,7 +97,7 @@ export function attemptsStore(path: string = PR_ATTEMPTS_PATH): AttemptsStore {
       const e = readEntries(path)[key(pr)];
       return e !== undefined && e.reviews + e.patches >= MAX_PR_ATTEMPTS;
     },
-    async flagForHuman(pr, gh = bunGh) {
+    async flagForHuman(pr, gh = defaultGh) {
       if (readEntries(path)[key(pr)]?.flagged) return;
       await ghOrThrow(gh, ["label", "create", NEEDS_HUMAN_LABEL, "--force", "--description", "Factory gave up; a human must look"]);
       await ghOrThrow(gh, ["pr", "edit", String(pr), "--add-label", NEEDS_HUMAN_LABEL]);

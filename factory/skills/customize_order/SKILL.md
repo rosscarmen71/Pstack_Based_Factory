@@ -13,7 +13,7 @@ question you ask with the `AskUserQuestion` tool is shown as option cards. Ask e
 (2-4 options, your recommended option first, and say so in its description); the engineer can always type their own
 answer. This includes the questions of the grill_me skill and the final approval in step 3.
 
-The input is a PR number. The output is the PR's task updated in `factory/tasks.json`, new commits pushed to the PR's
+The input is a PR number. The output is the PR's task updated in the task queue, new commits pushed to the PR's
 branch, and one summary comment that says how the task changed and what happened to each requested change.
 
 Customize order owns the change to the task and must confirm it with the engineer through the **grill_me** skill
@@ -21,12 +21,15 @@ before writing it. It owns the factory contract: every `gh` call, the checks, th
 result. The coding is done by **cook_poteto**. Other skills named here sit beside this one, at `../<name>/SKILL.md`
 from this skill's folder. Load each by reading that file with the Read tool; do not use the Skill tool for them.
 
+**The task queue** is this repository's `tasks.json`. It is kept in the factory's home, not in the repository. Get its
+path by running `~/.pstack-factory/bin/factory tasks-file` in the repository (or in a worktree of it), and use that
+path wherever this skill says "the task queue".
+
 ## Steps
 
 1. **Make a worktree for the PR.** The loop may be running in the main checkout and switching its branch, so never
    check out the PR there.
-   - Note the main checkout's root as `<main>` (`git rev-parse --show-toplevel`). The task file is
-     `<main>/factory/tasks.json`.
+   - Note the main checkout's root as `<main>` (`git rev-parse --show-toplevel`).
    - Read the PR's branch: `gh pr view <pr> --json state,headRefName`. Stop and report if the PR does not exist or
      is not open.
    - Run `git fetch origin`, then `git worktree add <main>/../customize-<pr> <branch>`. Do all PR work in that
@@ -36,7 +39,7 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
      it (`gh pr view <pr> --comments`). If there is none, remove the worktree and end the run as `skipped`: there is
      no request.
    - Other review comments and unresolved review threads posted after the last summary comment.
-   - The task, if the branch is `<type>/<task-id>` and that id exists in `<main>/factory/tasks.json`. If there is no
+   - The task, if the branch is `<type>/<task-id>` and that id exists in the task queue. If there is no
      matching task, post the summary saying so, remove the worktree and end as `skipped`.
 
    Failing CI and merge conflicts are not this skill's job. The loop sends them to remake after this run.
@@ -50,9 +53,13 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
       drafted.
    6. Get the engineer's explicit approval of the final change. If they do not approve, keep grilling until a new
       change, or no change, is agreed.
-   7. Write the agreed change to `<main>/factory/tasks.json`. Change only that task's `title`, `description` and
-      `acceptanceCriteria`. Never change its `id`, `status`, `dependencies` or any other task. Keep the file valid
-      JSON.
+   7. Write the agreed change to the task queue. Change only that task's `title`, `description` and
+      `acceptanceCriteria`. Never change its `id`, `status` or any other task. Keep the file valid JSON.
+   8. Update the task's dependencies: from `<main>`, read `../task-update-deps/SKILL.md` and follow it for this
+      task. It changes only this task's dependencies. If it returns a `waiting` list that is not empty, the changed
+      task must wait for those tasks: skip steps 4 and 5, and in step 6 push nothing and say in the summary that the
+      PR will be updated once they are done. The loop leaves the PR alone until then, then reviews it against the
+      changed task and patches it.
 
    If the engineer decides on no change, skip to step 6 and say so in the summary.
 4. **Update the PR to the new task.** Read `../cook_poteto/SKILL.md` and follow it in the worktree with this brief.
@@ -109,8 +116,8 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
 - Never rebase. Never merge the PR and never close it.
 - Never check out a branch in the main checkout. Work only in the worktree.
 - Never edit or stage code yourself; the coding is cook_poteto's.
-- In `factory/tasks.json`, change only this PR's task, only the fields step 3 names, and only after the engineer
-  approves.
+- In the task queue, change only this PR's task, only the fields step 3 names, and only after the engineer
+  approves. Its dependencies change only through task-update-deps.
 - Post exactly one comment per run, the summary. Post it even when nothing changed, so the request counts as
   answered.
 - Prefer one command per Bash call; avoid chaining with `&&`, `;` or pipes unless every part is a read-only helper.
