@@ -15,10 +15,13 @@ each by reading that file with the Read tool; do not use the Skill tool for them
 ## Steps
 
 1. **Load the task.** Read the task from `factory/tasks.json` by `id`. Stop and report if it does not exist. The loop
-   only starts a task once every dependency has reached `pr` (PR open, not necessarily merged).
+   only starts a task once every dependency is met: its task is `completed` (merged into main) or deleted, or, for a
+   hands-off dependency, its open PR has passed taste_test.
 2. **Create a branch.** Run `git fetch origin`. Start from the up-to-date base branch (`origin/main`). If the task has
-   dependencies, their code lives on their unmerged branches (`<type>/<dependency-id>`): branch from the dependency's
-   branch instead, and with several dependencies merge their branches in first. If that merge conflicts, resolve it
+   dependencies, read each one's `status` in `factory/tasks.json`. A dependency that is `completed`, or no longer in
+   the file, is already in `origin/main`: do nothing for it. Any other dependency's code lives on its unmerged branch
+   (`origin/<type>/<dependency-id>`): branch from that branch instead of main, and with several unmerged
+   dependencies merge the others in. The PR still targets main. If that merge conflicts, resolve it
    when the fix is clear; otherwise stop and end the run as `skipped` with the conflicting files as the reason. Create
    `<type>/<task-id>`, where `type` is the Conventional Commit type that fits the task (`feat`, `fix`, `refactor`,
    `docs`, `chore`). Never work on the base branch directly. Note the commit the branch starts from (after any
