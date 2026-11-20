@@ -8,6 +8,10 @@
  *   - POST /api/customize/:pr/answer and POST /api/customize/:pr/reply talk to the /customize_order agent this
  *     server hosts for the PR (customize-agent.ts), which the source layer starts for any unanswered request.
  *     GET /api/customize/:pr only reads its state.
+ *   - DELETE /api/tasks/:id deletes one task for good: it stops its agent, closes its PR, deletes its branch and
+ *     erases its records (factory/delete-task.ts). DELETE /api/sessions/:adw_id does that for every task of the
+ *     session. GET /api/tasks/:id/delete-preview says what a delete would do. POST /api/tasks/:id/complete marks a
+ *     task completed by hand.
  *   - POST /api/sessions/:adw_id/project writes the optional `project` field of each task in that order, in
  *     factory/tasks.json (through the task store, so it never clobbers the loop's own writes).
  * factory-source.ts also keeps viz/.needs-history.jsonl, and the agent manager keeps viz/.customize-agents.json.
@@ -17,8 +21,12 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { auditStore } from "../../factory/audit-log.ts";
+import { deleteTask, previewDelete, type DeleteReport } from "../../factory/delete-task.ts";
+import { attemptsStore } from "../../factory/pr-attempts.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
-import { customize, invalidate, isRunSession, load, readFeed, REPO_ROOT } from "./factory-source.ts";
+import { groupOrders } from "./factory-model.ts";
+import { customize, invalidate, isRunSession, load, readFeed, removeRunTranscripts, REPO_ROOT } from "./factory-source.ts";
 import { parseProjectBody, setOrderProject } from "./projects.ts";
 import type { AnswerBody, ReplyBody } from "../shared/customize.ts";
 import type { ApiError, EventsPage, HealthResponse } from "../shared/types.ts";
@@ -104,6 +112,10 @@ async function bodyOf(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
+/** Deletes one task with the real stores, GitHub and git, run from the repo root. */
+const removeTask = (id: string): Promise<DeleteReport | null> =>
+  deleteTask(id, { store: fileStore(), audit: auditStore(), attempts: attemptsStore(), removeTranscripts: removeRunTranscripts });
+
 const server = Bun.serve({
   port: PORT,
   hostname: HOST,
@@ -124,10 +136,50 @@ const server = Bun.serve({
 
     "/api/sessions": safely(async () => json((await load()).model.sessions)),
 
-    "/api/sessions/:adw_id": safely(async (req) => {
-      const detail = (await load()).model.details.get(param(req, "adw_id"));
-      return detail ? json(detail) : notFound(`no session ${param(req, "adw_id")}`);
+    "/api/sessions/:adw_id": {
+      GET: safely(async (req) => {
+        const detail = (await load()).model.details.get(param(req, "adw_id"));
+        return detail ? json(detail) : notFound(`no session ${param(req, "adw_id")}`);
+      }),
+      DELETE: safely(async (req) => {
+        const id = param(req, "adw_id");
+        const order = groupOrders(fileStore().load()).find((o) => o.id === id && o.taskIds.length > 0);
+        if (!order) return notFound(`no session ${id}`);
+        const reports: DeleteReport[] = [];
+        // One at a time: each delete rewrites tasks.json and may run git in the same checkout.
+        for (const taskId of order.taskIds) {
+          const report = await removeTask(taskId);
+          if (report) reports.push(report);
+        }
+        invalidate();
+        return json({ session: id, deleted: reports });
+      }),
+    },
+
+    "/api/tasks/:id/delete-preview": safely((req) => {
+      const preview = previewDelete(fileStore().load(), param(req, "id"));
+      return preview ? json(preview) : notFound(`no task ${param(req, "id")}`);
     }),
+
+    "/api/tasks/:id": {
+      DELETE: safely(async (req) => {
+        const report = await removeTask(param(req, "id"));
+        if (!report) return notFound(`no task ${param(req, "id")}`);
+        invalidate();
+        return json(report);
+      }),
+    },
+
+    "/api/tasks/:id/complete": {
+      POST: safely((req) => {
+        const id = param(req, "id");
+        const store = fileStore();
+        if (!store.load().some((t) => t.id === id)) return notFound(`no task ${id}`);
+        store.complete(id);
+        invalidate();
+        return json({ ok: true, id });
+      }),
+    },
 
     // Their one write (archive) has no meaning here: the factory's records are not the reader's to change.
     "/api/sessions/:adw_id/archive": { POST: () => json({ error: "archiving is disabled" } satisfies ApiError, 405) },

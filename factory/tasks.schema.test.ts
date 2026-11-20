@@ -90,6 +90,24 @@ describe("parseTasks", () => {
     expect(bad({ project: 3 })).toHaveLength(1);
   });
 
+  test("completed is a status; mode, session, needsYou, attempts and completedAt are checked", () => {
+    expect(bad({ status: "completed", completedAt: "2026-11-19T20:00:00.000Z" })).toEqual([]);
+    expect(bad({ mode: "hands-off", session: "s1", needsYou: "look", attempts: 2 })).toEqual([]);
+    expect(bad({ mode: "away" as never })).toHaveLength(1);
+    expect(bad({ session: " " })).toHaveLength(1);
+    expect(bad({ needsYou: "" })).toHaveLength(1);
+    expect(bad({ attempts: -1 })).toHaveLength(1);
+    expect(bad({ completedAt: "yesterday" })).toHaveLength(1);
+  });
+
+  test("dependency reasons must name real dependencies and be non-empty", () => {
+    const dep = valid({ id: "dep" });
+    expect(validateTasks([dep, valid({ dependencies: ["dep"], dependencyReasons: { dep: "both edit x.ts" } })])).toEqual([]);
+    expect(validateTasks([dep, valid({ dependencies: ["dep"], dependencyReasons: { other: "why" } })])[0]).toContain("not a dependency");
+    expect(validateTasks([dep, valid({ dependencies: ["dep"], dependencyReasons: { dep: " " } })])[0]).toContain("non-empty");
+    expect(bad({ dependencyReasons: [] as never })).toHaveLength(1);
+  });
+
   test("returns the tasks or throws with every problem listed", () => {
     expect(parseTasks([valid()])).toHaveLength(1);
     expect(() => parseTasks([valid({ id: "" })])).toThrow("invalid tasks.json");

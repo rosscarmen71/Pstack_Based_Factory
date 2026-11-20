@@ -1,7 +1,7 @@
-// Append-only audit log of factory runs, one JSON object per line (JSONL).
-// record() only ever appends; earlier lines are never rewritten.
+// Audit log of factory runs, one JSON object per line (JSONL).
+// record() only ever appends. The one rewrite is purge(), used when the engineer deletes a task and its history.
 
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 
 export const AUDIT_LOG_PATH = new URL("./audit-log.jsonl", import.meta.url).pathname;
 export const AUDIT_ACTIONS = ["dev-task", "review", "patch"] as const;
@@ -46,6 +46,8 @@ export interface AuditStore {
   record(entry: AuditEntry): void;
   /** All entries in append order; [] when the log does not exist yet. */
   list(): AuditEntry[];
+  /** Erases every entry the predicate matches, keeping the rest in order. Returns how many were erased. */
+  purge(matches: (entry: AuditEntry) => boolean): number;
 }
 
 function validate(entry: AuditEntry): void {
@@ -75,12 +77,7 @@ function validate(entry: AuditEntry): void {
 }
 
 export function auditStore(path: string = AUDIT_LOG_PATH): AuditStore {
-  return {
-    record(entry) {
-      validate(entry);
-      appendFileSync(path, `${JSON.stringify(entry)}\n`);
-    },
-    list() {
+  const list = (): AuditEntry[] => {
       if (!existsSync(path)) return [];
       const entries: AuditEntry[] = [];
       readFileSync(path, "utf8")
@@ -94,6 +91,21 @@ export function auditStore(path: string = AUDIT_LOG_PATH): AuditStore {
           }
         });
       return entries;
+  };
+  return {
+    record(entry) {
+      validate(entry);
+      appendFileSync(path, `${JSON.stringify(entry)}\n`);
+    },
+    list,
+    purge(matches) {
+      const entries = list();
+      const kept = entries.filter((e) => !matches(e));
+      if (kept.length === entries.length) return 0;
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}\n`).join(""));
+      renameSync(tmp, path); // atomic: readers never see a half-written log
+      return entries.length - kept.length;
     },
   };
 }

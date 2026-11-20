@@ -28,8 +28,21 @@ export interface PrComment {
   createdAt: string;
 }
 
+/** A PR that is no longer open: merged, or closed without merging. */
+export interface ClosedPr {
+  number: number;
+  url: string;
+  /** "owner/name". */
+  repo: string;
+  branch: string;
+  createdAt: string;
+  merged: boolean;
+}
+
 export interface PrSource {
   list(): Promise<PullRequest[]>;
+  /** Recently closed PRs, merged or not, so a merge can be told from a plain close. Optional for task-only sources. */
+  listClosed?(): Promise<ClosedPr[]>;
 }
 
 export interface GhResult {
@@ -127,29 +140,52 @@ function normalizePr(raw: unknown, index: number): PullRequest {
   };
 }
 
-/** Lists open PRs of the current repo via `gh pr list`. Throws a descriptive error on gh failure or bad JSON. */
+export const CLOSED_PR_JSON_FIELDS = "number,url,headRefName,createdAt,mergedAt";
+/** How many of the most recently created closed PRs are read each poll. */
+export const CLOSED_PR_LIMIT = 100;
+
+function normalizeClosedPr(raw: unknown, index: number): ClosedPr {
+  if (typeof raw !== "object" || raw === null) throw new Error(`gh pr list: closed entry ${index} is not an object`);
+  const r = raw as Record<string, unknown>;
+  if (typeof r.number !== "number") throw new Error(`gh pr list: closed entry ${index} has no numeric "number"`);
+  const repo = repoFromUrl(r.url);
+  if (repo === null) throw new Error(`gh pr list: closed PR #${r.number} has a missing or malformed url: ${JSON.stringify(r.url)}`);
+  if (typeof r.headRefName !== "string") throw new Error(`gh pr list: closed PR #${r.number} has no string "headRefName"`);
+  if (typeof r.createdAt !== "string") throw new Error(`gh pr list: closed PR #${r.number} has no string "createdAt"`);
+  return {
+    number: r.number,
+    url: r.url as string,
+    repo,
+    branch: r.headRefName,
+    createdAt: r.createdAt,
+    merged: typeof r.mergedAt === "string" && r.mergedAt !== "",
+  };
+}
+
+async function ghJsonArray(gh: GhRunner, args: string[]): Promise<unknown[]> {
+  const { exitCode, stdout, stderr } = await gh(args);
+  if (exitCode !== 0) throw new Error(`gh pr list failed (exit ${exitCode}): ${stderr.trim() || "no output"}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (e) {
+    throw new Error(`gh pr list returned invalid JSON: ${(e as Error).message}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error("gh pr list returned invalid JSON: expected an array");
+  return parsed;
+}
+
+/** Lists PRs of the current repo via `gh pr list`. Throws a descriptive error on gh failure or bad JSON. */
 export function ghPrSource(gh: GhRunner = bunGh): PrSource {
   return {
     async list() {
-      const { exitCode, stdout, stderr } = await gh([
-        "pr",
-        "list",
-        "--state",
-        "open",
-        "--limit",
-        "200",
-        "--json",
-        PR_JSON_FIELDS,
-      ]);
-      if (exitCode !== 0) throw new Error(`gh pr list failed (exit ${exitCode}): ${stderr.trim() || "no output"}`);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(stdout);
-      } catch (e) {
-        throw new Error(`gh pr list returned invalid JSON: ${(e as Error).message}`);
-      }
-      if (!Array.isArray(parsed)) throw new Error("gh pr list returned invalid JSON: expected an array");
-      return parsed.map(normalizePr);
+      const raw = await ghJsonArray(gh, ["pr", "list", "--state", "open", "--limit", "200", "--json", PR_JSON_FIELDS]);
+      return raw.map(normalizePr);
+    },
+    async listClosed() {
+      // `closed` includes merged PRs; mergedAt tells the two apart.
+      const raw = await ghJsonArray(gh, ["pr", "list", "--state", "closed", "--limit", String(CLOSED_PR_LIMIT), "--json", CLOSED_PR_JSON_FIELDS]);
+      return raw.map(normalizeClosedPr);
     },
   };
 }

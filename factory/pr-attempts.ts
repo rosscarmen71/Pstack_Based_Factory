@@ -30,6 +30,8 @@ export interface AttemptsStore {
   flagForHuman(pr: number, gh?: GhRunner): Promise<void>;
   /** Prunes entries for PRs no longer open, resets a flagged PR whose label was removed, and zeroes the counts of a PR with a new `/remake` or customize-order answer. */
   sync(openPrs: PullRequest[]): void;
+  /** Forgets everything recorded about the PR. Returns false when nothing was recorded. */
+  remove(pr: number): boolean;
 }
 
 type Entries = Record<string, PrAttempts>;
@@ -129,6 +131,13 @@ export function attemptsStore(path: string = PR_ATTEMPTS_PATH): AttemptsStore {
         changed = true;
       }
       if (changed) writeEntries(path, entries);
+    },
+    remove(pr) {
+      const entries = readEntries(path);
+      if (!(key(pr) in entries)) return false;
+      delete entries[key(pr)];
+      writeEntries(path, entries);
+      return true;
     },
   };
 }

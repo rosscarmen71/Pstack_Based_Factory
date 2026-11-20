@@ -8,3 +8,5 @@ factory/tasks.json
 factory/loop.lock
 factory/loop.lock.*.tmp
 .claude/settings.local.json
+factory/audit-log.jsonl.tmp
+factory/tasks.json.tmp

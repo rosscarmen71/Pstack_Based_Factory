@@ -93,6 +93,21 @@ describe("orders", () => {
     expect(orders[1]?.title).toBe("Title c");
   });
 
+  test("tasks that store a session are grouped by it, whatever their dates", () => {
+    const orders = groupOrders([
+      task("a", { createdAt: at(0), session: "s1" }),
+      task("b", { createdAt: at(1), session: "s2" }),
+      task("c", { createdAt: at(90), session: "s1" }),
+      task("d", { createdAt: at(91) }),
+    ]);
+    expect(orders.map((o) => [o.id, o.taskIds])).toEqual([
+      ["s1", ["a", "c"]],
+      ["s2", ["b"]],
+      ["order-d", ["d"]],
+    ]);
+    expect(orders[0]?.title).toBe("Title a +1 more");
+  });
+
   test("tasks with no createdAt go into one 'Tasks without a date' order", () => {
     const orders = groupOrders([task("a"), task("b", { createdAt: undefined })]);
     expect(orders.at(-1)).toEqual({ id: UNDATED_ID, title: "Tasks without a date", taskIds: ["b"] });

@@ -11,7 +11,7 @@
  *   result checklist           -> GateResult.checks_json
  */
 import type { AuditAction, AuditEntry } from "../../factory/audit-log.ts";
-import type { Task } from "../../factory/tasks.schema.ts";
+import { isDependencyDone, type Task } from "../../factory/tasks.schema.ts";
 import type {
   AgentSession,
   Envelope,
@@ -263,12 +263,28 @@ export interface Order {
   taskIds: string[];
 }
 
-/** Groups tasks into take_order orders: neighbours in tasks.json whose createdAt are within ORDER_GAP_MS. */
+/**
+ * Groups tasks into sessions (take_order orders). A task that stores its `session` belongs to exactly that one,
+ * whose id is the stored id. Older tasks without one are grouped the old way: neighbours in tasks.json whose
+ * createdAt are within ORDER_GAP_MS.
+ */
 export function groupOrders(tasks: Task[]): Order[] {
   const orders: Order[] = [];
   const undated: string[] = [];
+  const bySession = new Map<string, Order>();
   let current: { ids: string[]; last: number } | null = null;
   for (const task of tasks) {
+    if (task.session) {
+      let order = bySession.get(task.session);
+      if (!order) {
+        order = { id: task.session, title: "", taskIds: [] };
+        bySession.set(task.session, order);
+        orders.push(order);
+      }
+      order.taskIds.push(task.id);
+      current = null;
+      continue;
+    }
     const at = task.createdAt ? Date.parse(task.createdAt) : Number.NaN;
     if (!Number.isFinite(at)) {
       undated.push(task.id);
@@ -286,7 +302,7 @@ export function groupOrders(tasks: Task[]): Order[] {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   for (const o of orders) {
     const first = byId.get(o.taskIds[0] ?? "");
-    o.id = `order-${o.taskIds[0]}`;
+    if (!bySession.has(o.id)) o.id = `order-${o.taskIds[0]}`;
     o.title = orderTitle(first?.title ?? o.taskIds[0] ?? "order", o.taskIds.length);
   }
   if (undated.length) orders.push({ id: UNDATED_ID, title: "Tasks without a date", taskIds: undated });
@@ -614,7 +630,7 @@ export function orderStatus(laneRuns: Run[][], tasks: Task[], isTaskOrder: boole
   const broke = (r: Run) => r.status === "fail" || (r.kind === "cook" && r.status === "skipped");
   if (latest.some(broke)) return "broken";
   if (laneRuns.flat().some((r) => r.status === "running")) return "running";
-  if (isTaskOrder) return tasks.length > 0 && tasks.every((t) => t.status === "pr") ? "done" : "waiting";
+  if (isTaskOrder) return tasks.length > 0 && tasks.every((t) => isDependencyDone(t.status)) ? "done" : "waiting";
   return latest.length > 0 ? "done" : "waiting";
 }
 
@@ -668,7 +684,7 @@ function resultChecks(r: Run, snap: Snapshot): GateCheck[] {
   }
   if (r.kind === "cook") {
     const task = snap.tasks.find((t) => t.id === r.target);
-    checks.push({ item: "task moved to pr", ok: task?.status === "pr", note: `status: ${task?.status ?? "task not found"}` });
+    checks.push({ item: "task moved to pr", ok: task !== undefined && isDependencyDone(task.status), note: `status: ${task?.status ?? "task not found"}` });
     checks.push(prOpenCheck(r.pr));
     checks.push(ciCheck(r.pr));
   } else {
@@ -815,7 +831,10 @@ export function buildModel(snap: Snapshot): Model {
       }
 
       if (task && task.status === "pending" && !rs.some((r) => r.status === "running")) {
-        const waitingOn = deps.filter((d) => taskById.get(d)?.status !== "pr");
+        const waitingOn = deps.filter((d) => {
+          const dep = taskById.get(d);
+          return !dep || !isDependencyDone(dep.status);
+        });
         phases.push({
           phase_id: `queued:${task.id}`,
           adw_id: order.id,

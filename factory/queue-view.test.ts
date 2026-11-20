@@ -32,6 +32,7 @@ const pr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
 });
 
 const fakeAttempts = (entries: Record<number, PrAttempts> = {}): AttemptsStore => ({
+  remove: () => false,
   get: (n) => entries[n],
   record: () => {},
   exceeded: (n) => {
