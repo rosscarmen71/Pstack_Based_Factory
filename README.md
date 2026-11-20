@@ -10,12 +10,6 @@ A small software factory that relies heavily on [pstack skills](https://github.c
 > The factory visuals are adapted from the
 > [disler super-simple-software-factory repo](https://github.com/disler/super-simple-software-factory/tree/example)
 
-<img src="img/PBSF_1.png" alt="img 1" width="800"/>
-
-<img src="img/PBSF_7.png" alt="img 2" width="800"/>
-
-<img src="img/PBSF_2.png" alt="img 3" width="400"/>
-
 ### Table of Contents
 * [What Is The **Pstack_Based_Factory**?](#what-is-the-pstack_based_factory)
 * [How To **Setup** The Factory?](#setup)
