@@ -105,6 +105,7 @@ describe("setDependencies", () => {
     ]);
     expect(() => setDependencies(store, "b", { c: "clash" })).toThrow("deadlock");
     expect(() => setDependencies(store, "nope", {})).toThrow('no task "nope"');
+    expect(() => setDependencies(store, "a", { b: "x" })).toThrow("final");
     expect(readFileSync(path, "utf8")).toBe(before);
   });
 });

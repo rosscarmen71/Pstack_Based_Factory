@@ -22,6 +22,7 @@ import { agentColor, argsSummary, parseAgentStart, parsePayload } from '../lib/e
 import { gapLabel, layoutTimeline, type Interval } from '../lib/timeline'
 import { navigate, phaseCrumb } from '../lib/router'
 import StatusChip from './StatusChip.vue'
+import TaskControls from './TaskControls.vue'
 import StatChip from './StatChip.vue'
 import PhaseDetail from './PhaseDetail.vue'
 
@@ -522,6 +523,8 @@ function blockTip(e: MouseEvent, p: Phase) {
         <StatChip kind="written" :value="usage.written" />
       </span>
     </div>
+
+    <TaskControls :lane-meta="laneMeta" @changed="tick" />
 
     <div v-if="phases.length" class="waterfall">
       <div ref="scroller" class="scroller">

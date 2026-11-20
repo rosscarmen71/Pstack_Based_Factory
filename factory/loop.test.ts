@@ -926,6 +926,22 @@ describe("runLoop scheduler", () => {
     expect(runs).toBe(2);
   });
 
+  test("while paused by the engineer nothing starts; un-pausing resumes on the next poll", async () => {
+    const { store } = memStore([task("A")]);
+    let paused = true;
+    const started: string[] = [];
+    const s = fakeSleep(3, (n) => {
+      if (n === 1) expect(started).toEqual([]);
+      if (n === 2) paused = false;
+    });
+    const run: Runner = async (t) => {
+      started.push(t.id);
+      return res();
+    };
+    await runLoop(store, run, undefined, { ...s, settings: () => ({ ...DEFAULT_SETTINGS, paused }) });
+    expect(started).toEqual(["A"]);
+  });
+
   test("the published state lists what is running", async () => {
     const { store } = memStore([task("A")]);
     const g = gated();

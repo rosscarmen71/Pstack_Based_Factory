@@ -11,6 +11,7 @@ import { auditStore } from "../../factory/audit-log.ts";
 import type { TaskTarget } from "../../factory/delete-task.ts";
 import { MAX_PR_ATTEMPTS } from "../../factory/pr-attempts.ts";
 import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, pendingRequest } from "../../factory/pr-state.ts";
+import { DEFAULT_SETTINGS, type Settings, settingsStore } from "../../factory/settings.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
 import { claudeProjectDir, WORKTREES_DIR } from "../../factory/worktrees.ts";
 import type { Task } from "../../factory/tasks.schema.ts";
@@ -407,6 +408,12 @@ async function build(now: number, gen: number): Promise<Loaded> {
   } catch (e) {
     errors.audit = (e as Error).message;
   }
+  let settings: Settings = DEFAULT_SETTINGS;
+  try {
+    settings = settingsStore().load();
+  } catch (e) {
+    errors.settings = (e as Error).message;
+  }
   const [prs, running] = await Promise.all([readPrs(now), loopRunning(now)]);
   if (prError) errors.github = prError;
   const runsPerPr = new Map<number, number>();
@@ -422,6 +429,7 @@ async function build(now: number, gen: number): Promise<Loaded> {
     loopRunning: running,
     customize: customize.all(),
     now,
+    settings,
   };
   const model = buildModel(snap);
   try {

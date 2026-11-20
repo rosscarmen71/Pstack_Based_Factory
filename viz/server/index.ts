@@ -12,6 +12,9 @@
  *     erases its records (factory/delete-task.ts). DELETE /api/sessions/:adw_id does that for every task of the
  *     session. GET /api/tasks/:id/delete-preview says what a delete would do. POST /api/tasks/:id/complete marks a
  *     task completed by hand. POST /api/tasks/:id/retry un-parks a task the loop parked after a failure.
+ *   - POST /api/factory changes the factory-wide switches (default mode, agent cap, pause) in factory/settings.json.
+ *     POST /api/projects/:name/mode, /api/sessions/:adw_id/mode and /api/tasks/:id/mode set or clear the mode at
+ *     that level. POST /api/tasks/:id/dependencies adds or removes one dependency of a task.
  *   - POST /api/sessions/:adw_id/project writes the optional `project` field of each task in that order, in
  *     factory/tasks.json (through the task store, so it never clobbers the loop's own writes).
  * factory-source.ts also keeps viz/.needs-history.jsonl, and the agent manager keeps viz/.customize-agents.json.
@@ -24,6 +27,10 @@ import { join, resolve } from "node:path";
 import { auditStore } from "../../factory/audit-log.ts";
 import { deleteTask, previewDelete, type DeleteReport } from "../../factory/delete-task.ts";
 import { attemptsStore } from "../../factory/pr-attempts.ts";
+import { checkDependencies, setDependencies } from "../../factory/deps.ts";
+import { readLoopState } from "../../factory/loop.ts";
+import { MAX_AGENT_CAP, type Settings, settingsStore } from "../../factory/settings.ts";
+import { TASK_MODES, type TaskMode } from "../../factory/tasks.schema.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
 import { groupOrders } from "./factory-model.ts";
 import { customize, invalidate, isRunSession, load, readFeed, removeRunTranscripts, runCwd } from "./factory-source.ts";
@@ -113,6 +120,25 @@ async function bodyOf(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
+/** A request body `{mode}`: hands-on, hands-off, or null to inherit. Undefined when it is none of those. */
+function modeOf(body: Record<string, unknown> | null): TaskMode | null | undefined {
+  if (!body || !("mode" in body)) return undefined;
+  if (body.mode === null) return null;
+  return TASK_MODES.includes(body.mode as TaskMode) ? (body.mode as TaskMode) : undefined;
+}
+
+const BAD_MODE = `body must be {mode: ${TASK_MODES.map((m) => `"${m}"`).join(" or ")}, or null to inherit}`;
+
+/** Sets or clears one key of a mode map in the settings. */
+function setLevelMode(map: "projects" | "sessions", key: string, mode: TaskMode | null): Settings {
+  return settingsStore().update((s) => {
+    const next = { ...s[map] };
+    if (mode === null) delete next[key];
+    else next[key] = mode;
+    return { ...s, [map]: next };
+  });
+}
+
 /** Deletes one task with the real stores, GitHub and git, run from the repo root. */
 const removeTask = (id: string): Promise<DeleteReport | null> =>
   deleteTask(id, { store: fileStore(), audit: auditStore(), attempts: attemptsStore(), removeTranscripts: removeRunTranscripts });
@@ -149,6 +175,7 @@ const server = Bun.serve({
         const reports: DeleteReport[] = [];
         // One at a time: each delete rewrites tasks.json and may run git in the same checkout.
         for (const taskId of order.taskIds) {
+          // oxlint-disable-next-line no-await-in-loop
           const report = await removeTask(taskId);
           if (report) reports.push(report);
         }
@@ -156,6 +183,14 @@ const server = Bun.serve({
         return json({ session: id, deleted: reports });
       }),
     },
+
+    "/api/sessions/:adw_id/delete-preview": safely((req) => {
+      const id = param(req, "adw_id");
+      const tasks = fileStore().load();
+      const order = groupOrders(tasks).find((o) => o.id === id && o.taskIds.length > 0);
+      if (!order) return notFound(`no session ${id}`);
+      return json(order.taskIds.flatMap((taskId) => previewDelete(tasks, taskId) ?? []));
+    }),
 
     "/api/tasks/:id/delete-preview": safely((req) => {
       const preview = previewDelete(fileStore().load(), param(req, "id"));
@@ -168,6 +203,103 @@ const server = Bun.serve({
         if (!report) return notFound(`no task ${param(req, "id")}`);
         invalidate();
         return json(report);
+      }),
+    },
+
+    // The factory-wide switches and what the loop is doing right now.
+    "/api/factory": {
+      GET: safely(() => {
+        const tasks = fileStore().load();
+        const projects = [...new Set(tasks.map((t) => t.project).filter((p): p is string => !!p))].toSorted((a, b) => a.localeCompare(b));
+        return json({ settings: settingsStore().load(), loop: readLoopState(), projects, maxAgentCap: MAX_AGENT_CAP });
+      }),
+      POST: safely(async (req) => {
+        const body = await bodyOf(req);
+        if (!body) return badBody("body must be an object with defaultMode, agentCap and/or paused");
+        const patch: Partial<Settings> = {};
+        if ("defaultMode" in body) {
+          if (!TASK_MODES.includes(body.defaultMode as TaskMode)) return badBody(`defaultMode must be ${TASK_MODES.join(" or ")}`);
+          patch.defaultMode = body.defaultMode as TaskMode;
+        }
+        if ("agentCap" in body) {
+          const cap = body.agentCap;
+          if (typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 || cap > MAX_AGENT_CAP) return badBody(`agentCap must be a whole number from 1 to ${MAX_AGENT_CAP}`);
+          patch.agentCap = cap;
+        }
+        if ("paused" in body) {
+          if (typeof body.paused !== "boolean") return badBody("paused must be true or false");
+          patch.paused = body.paused;
+        }
+        if (Object.keys(patch).length === 0) return badBody("nothing to change: give defaultMode, agentCap and/or paused");
+        const settings = settingsStore().update((s) => ({ ...s, ...patch }));
+        invalidate();
+        return json({ settings });
+      }),
+    },
+
+    "/api/projects/:name/mode": {
+      POST: safely(async (req) => {
+        const name = param(req, "name");
+        const mode = modeOf(await bodyOf(req));
+        if (mode === undefined) return badBody(BAD_MODE);
+        if (!fileStore().load().some((t) => t.project === name)) return notFound(`no project ${name}`);
+        setLevelMode("projects", name, mode);
+        invalidate();
+        return json({ ok: true, project: name, mode });
+      }),
+    },
+
+    "/api/sessions/:adw_id/mode": {
+      POST: safely(async (req) => {
+        const id = param(req, "adw_id");
+        const mode = modeOf(await bodyOf(req));
+        if (mode === undefined) return badBody(BAD_MODE);
+        // Only a session whose tasks store its id can carry a setting of its own.
+        if (!fileStore().load().some((t) => t.session === id)) return notFound(`no session ${id} with a stored id`);
+        setLevelMode("sessions", id, mode);
+        invalidate();
+        return json({ ok: true, session: id, mode });
+      }),
+    },
+
+    "/api/tasks/:id/mode": {
+      POST: safely(async (req) => {
+        const id = param(req, "id");
+        const mode = modeOf(await bodyOf(req));
+        if (mode === undefined) return badBody(BAD_MODE);
+        const store = fileStore();
+        if (!store.load().some((t) => t.id === id)) return notFound(`no task ${id}`);
+        store.update(id, { mode: mode ?? undefined });
+        invalidate();
+        return json({ ok: true, id, mode });
+      }),
+    },
+
+    // Adds or removes one dependency of a task by hand. Anything that would deadlock two tasks is refused.
+    "/api/tasks/:id/dependencies": {
+      POST: safely(async (req) => {
+        const id = param(req, "id");
+        const body = await bodyOf(req);
+        const store = fileStore();
+        const task = store.load().find((t) => t.id === id);
+        if (!task) return notFound(`no task ${id}`);
+        const deps: Record<string, string> = Object.fromEntries(task.dependencies.map((d) => [d, task.dependencyReasons?.[d] ?? "added before reasons were recorded"]));
+        if (typeof body?.remove === "string") {
+          if (!(body.remove in deps)) return badBody(`${body.remove} is not a dependency of ${id}`);
+          delete deps[body.remove];
+        } else if (typeof body?.add === "string" && typeof body.reason === "string" && body.reason.trim() !== "") {
+          deps[body.add] = body.reason.trim();
+        } else {
+          return badBody("body must be {add: <task id>, reason: <one line>} or {remove: <task id>}");
+        }
+        // Dependencies on tasks that were completed since are dropped rather than refused.
+        const tasks = store.load();
+        for (const d of Object.keys(deps)) if (d !== body?.add && tasks.find((t) => t.id === d)?.status === "completed") delete deps[d];
+        const errors = checkDependencies(tasks, id, deps);
+        if (errors.length > 0) return badBody(errors.join("; "));
+        const updated = setDependencies(store, id, deps);
+        invalidate();
+        return json({ id, dependencies: updated.dependencies, dependencyReasons: updated.dependencyReasons ?? {} });
       }),
     },
 

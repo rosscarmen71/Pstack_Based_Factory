@@ -1,14 +1,37 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import type { OrderSummary } from '../lib/types'
-import { fetchSessions } from '../lib/api'
+import { fetchFactory, fetchSessions, setMode, type FactoryState, type ModeInfo, type TaskMode } from '../lib/api'
 import { ts } from '../lib/format'
 import SessionCard from './SessionCard.vue'
+import ModeSwitch from './ModeSwitch.vue'
 
 const sessions = shallowRef<OrderSummary[]>([])
 const apiError = ref<string | null>(null)
 const loaded = ref(false)
 const nowMs = ref(Date.now())
+const factory = ref<FactoryState | null>(null)
+
+/** A project's mode: its own setting, or the factory default it inherits. */
+function projectMode(name: string): ModeInfo | null {
+  const settings = factory.value?.settings
+  if (!settings) return null
+  const own = settings.projects[name] ?? null
+  return { mode: own ?? settings.defaultMode, from: own ? 'project' : 'default', own, inherited: settings.defaultMode }
+}
+
+const modeBusy = ref(false)
+async function changeProjectMode(name: string, mode: TaskMode | null) {
+  modeBusy.value = true
+  try {
+    await setMode('projects', name, mode)
+    await tick()
+  } catch (err) {
+    apiError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    modeBusy.value = false
+  }
+}
 
 let timer: ReturnType<typeof setInterval> | undefined
 let inflight = false
@@ -17,7 +40,9 @@ async function tick() {
   if (inflight) return
   inflight = true
   try {
-    sessions.value = await fetchSessions()
+    const [list, factoryState] = await Promise.all([fetchSessions(), fetchFactory().catch(() => factory.value)])
+    sessions.value = list
+    factory.value = factoryState
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
@@ -49,7 +74,10 @@ const NO_PROJECT_LABEL = 'No project'
 
 interface Group {
   name: string | null
+  /** Sessions with work left, in the engineer-first order. */
   sessions: OrderSummary[]
+  /** Sessions whose every task is completed: shown collapsed, at the bottom of the project. */
+  completed: OrderSummary[]
   latest: number
 }
 
@@ -61,10 +89,11 @@ const groups = computed<Group[]>(() => {
     const name = s.project?.trim() ? s.project : null
     let g = byName.get(name)
     if (!g) {
-      g = { name, sessions: [], latest: -Infinity }
+      g = { name, sessions: [], completed: [], latest: -Infinity }
       byName.set(name, g)
     }
-    g.sessions.push(s)
+    if (s.completed) g.completed.push(s)
+    else g.sessions.push(s)
     const t = ts(s.started_at)
     if (Number.isFinite(t) && t > g.latest) g.latest = t
   }
@@ -96,7 +125,14 @@ const projectNames = computed(() =>
         <span class="group-name" :class="{ none: g.name === null }" :title="g.name ?? NO_PROJECT_LABEL">{{
           g.name ?? NO_PROJECT_LABEL
         }}</span>
-        <span class="group-count dim">{{ g.sessions.length }}</span>
+        <span class="group-count dim">{{ g.sessions.length + g.completed.length }}</span>
+        <ModeSwitch
+          v-if="g.name !== null && projectMode(g.name)"
+          class="group-mode"
+          :info="projectMode(g.name)!"
+          :busy="modeBusy"
+          @set="(m: TaskMode | null) => changeProjectMode(g.name!, m)"
+        />
       </h2>
       <div class="cards">
         <SessionCard
@@ -108,6 +144,19 @@ const projectNames = computed(() =>
           @project-changed="tick"
         />
       </div>
+      <details v-if="g.completed.length" class="completed-group">
+        <summary class="dim">Completed ({{ g.completed.length }})</summary>
+        <div class="cards">
+          <SessionCard
+            v-for="s in g.completed"
+            :key="s.adw_id"
+            :session="s"
+            :now-ms="nowMs"
+            :projects="projectNames"
+            @project-changed="tick"
+          />
+        </div>
+      </details>
     </section>
     </template>
     <div v-else-if="loaded" class="empty-state">no orders yet — run take_order to see one here</div>
@@ -146,6 +195,25 @@ const projectNames = computed(() =>
 
 .group-name.none {
   color: var(--dim);
+}
+
+.group-mode {
+  flex: none;
+  font-weight: 400;
+}
+
+.completed-group {
+  padding: 0 24px 12px;
+}
+
+.completed-group > summary {
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 0 8px;
+}
+
+.completed-group .cards {
+  padding: 8px 0 16px;
 }
 
 .group-count {

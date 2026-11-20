@@ -16,9 +16,14 @@ export interface Settings {
   sessions: Record<string, TaskMode>;
   /** How many agents one repo's loop may run at once. */
   agentCap: number;
+  /** While true the loop starts nothing new; running agents finish. */
+  paused: boolean;
 }
 
-export const DEFAULT_SETTINGS: Settings = { defaultMode: "hands-on", projects: {}, sessions: {}, agentCap: DEFAULT_AGENT_CAP };
+export const DEFAULT_SETTINGS: Settings = { defaultMode: "hands-on", projects: {}, sessions: {}, agentCap: DEFAULT_AGENT_CAP, paused: false };
+
+/** The largest agent cap the visualizer offers. */
+export const MAX_AGENT_CAP = 10;
 
 export type ModeLevel = "task" | "session" | "project" | "default";
 
@@ -26,6 +31,28 @@ export interface ResolvedMode {
   mode: TaskMode;
   /** The level the mode came from: the most specific one that sets it. */
   from: ModeLevel;
+}
+
+/** A level's mode as the visualizer shows it: what applies, what it would inherit, and its own override if any. */
+export interface ModeInfo extends ResolvedMode {
+  /** This level's own setting; null when it inherits. */
+  own: TaskMode | null;
+  /** What it gets from the levels above, whether or not it overrides them. */
+  inherited: TaskMode;
+}
+
+/** The mode of a task, a session or a project, with what that level inherits. */
+export function modeInfo(level: "task" | "session" | "project", fields: Pick<Task, "mode" | "session" | "project">, settings: Settings): ModeInfo {
+  const above: Pick<Task, "mode" | "session" | "project"> =
+    level === "task" ? { session: fields.session, project: fields.project } : level === "session" ? { project: fields.project } : {};
+  const own =
+    level === "task"
+      ? (fields.mode ?? null)
+      : level === "session"
+        ? ((fields.session === undefined ? undefined : settings.sessions[fields.session]) ?? null)
+        : ((fields.project === undefined ? undefined : settings.projects[fields.project]) ?? null);
+  const at: Pick<Task, "mode" | "session" | "project"> = level === "task" ? fields : level === "session" ? { session: fields.session, project: fields.project } : { project: fields.project };
+  return { ...resolveModeSource(at, settings), own, inherited: resolveMode(above, settings) };
 }
 
 type ModeFields = Pick<Task, "mode" | "session" | "project">;
@@ -58,6 +85,7 @@ export function validateSettings(raw: unknown): string[] {
   if (!isModeMap(o.projects)) errors.push(`projects must map project names to ${modes}`);
   if (!isModeMap(o.sessions)) errors.push(`sessions must map session ids to ${modes}`);
   if (typeof o.agentCap !== "number" || !Number.isInteger(o.agentCap) || o.agentCap < 1) errors.push("agentCap must be a whole number of at least 1");
+  if (typeof o.paused !== "boolean") errors.push("paused must be true or false");
   return errors;
 }
 

@@ -30,6 +30,8 @@ export type {
   Need,
   NeedKind,
   LaneMeta,
+  TaskInfo,
+  TaskDep,
   OrderStatus,
   OrderSummary,
   OrderDetail,

@@ -11,6 +11,7 @@
  *   result checklist           -> GateResult.checks_json
  */
 import type { AuditAction, AuditEntry } from "../../factory/audit-log.ts";
+import { DEFAULT_SETTINGS, type ModeInfo, modeInfo, resolveMode, type Settings } from "../../factory/settings.ts";
 import { isDependencyDone, type Task } from "../../factory/tasks.schema.ts";
 import type {
   AgentSession,
@@ -123,6 +124,8 @@ export interface Snapshot {
   /** The /customize_order agents the visualizer hosts, by PR number. */
   customize: Record<number, CustomizeState>;
   now: number;
+  /** Modes and caps; the built-in defaults when absent. */
+  settings?: Settings;
 }
 
 // ── Outputs beyond their shared types ───────────────────────────────────────
@@ -151,9 +154,32 @@ export interface Need {
   goTo: { kind: "pr"; url: string } | { kind: "run"; phaseId: string };
 }
 
+/** One dependency of a task, as the visualizer shows it. */
+export interface TaskDep {
+  id: string;
+  /** Why it is a dependency; null when none was recorded. */
+  reason: string | null;
+  met: boolean;
+  /** What is still being waited for, e.g. "waiting on a to merge"; null when met. */
+  text: string | null;
+}
+
+/** What the visualizer needs to show and control one task. */
+export interface TaskInfo {
+  id: string;
+  status: Task["status"];
+  /** Why the task is parked for the engineer; null when it is not. */
+  needsYou: string | null;
+  attempts: number;
+  mode: ModeInfo;
+  dependencies: TaskDep[];
+}
+
 export interface LaneMeta {
   title: string;
   subtitle: string;
+  /** The lane's task, when the lane is a task (not an unlinked PR). */
+  task?: TaskInfo;
   /** The lane's pull request, when it has one: the run panel's "Open PR" button and customize card need it. */
   pr?: { number: number; url: string };
 }
@@ -165,6 +191,12 @@ export interface OrderSummary extends SessionSummary {
   order_status: OrderStatus;
   needs_open: number;
   needs_broken: number;
+  /** The session's mode. Null for the catch-all buckets, and for older orders with no stored session id. */
+  mode: ModeInfo | null;
+  /** True when it has tasks and every one of them is completed. */
+  completed: boolean;
+  /** How many tasks it has; 0 for the unlinked-PRs bucket. */
+  task_count: number;
 }
 
 export interface OrderDetail extends SessionDetail {
@@ -452,7 +484,7 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
       id: `loop_stopped:${r.id}`,
       kind: "loop_stopped",
       severity: "broken",
-      title: "Loop stopped",
+      title: "Task parked",
       description: `cook on ${r.target} ${r.status === "skipped" ? "skipped" : "failed"}: ${r.audit.reason ?? "no reason"}. The task is parked until you retry it (or until its retries run out, in hands-off mode).`,
       sessionId: sessionOfLane(r.lane),
       lane: r.lane,
@@ -712,7 +744,21 @@ const ciCheck = (pr: PrInfo | null): GateCheck =>
 const tokenTotal = (t: Tokens) => t.input + t.output + t.cacheRead + t.cacheWrite;
 
 /** Builds every session the UI can show, from one snapshot. */
+/** What a not-yet-started task is still waiting for on one dependency, by that dependency's own mode. */
+export function depState(id: string, reason: string | null, tasks: Map<string, Task>, settings: Settings): TaskDep {
+  const dep = tasks.get(id);
+  // Deleted: nothing to wait for. Completed: already in main.
+  if (!dep || dep.status === "completed") return { id, reason, met: true, text: null };
+  let text: string;
+  if (dep.needsYou) text = `waiting on you: ${id}: ${dep.needsYou}`;
+  else if (dep.status !== "pr") text = `waiting on ${id} to be built`;
+  else if (resolveMode(dep, settings) === "hands-on") text = `waiting on ${id} to merge`;
+  else text = `waiting on taste_test of ${id}`;
+  return { id, reason, met: false, text };
+}
+
 export function buildModel(snap: Snapshot): Model {
+  const settings = snap.settings ?? DEFAULT_SETTINGS;
   const runs = buildRuns(snap);
   const orders = groupOrders(snap.tasks);
   const sessionOfTask = new Map<string, string>();
@@ -775,6 +821,16 @@ export function buildModel(snap: Snapshot): Model {
         ? { title: task.id, subtitle: deps.length ? `needs ${depText}` : "no dependencies" }
         : { title: lane, subtitle: pr?.branch ?? "no task matches this branch" };
       if (pr) laneMeta[lane].pr = { number: pr.number, url: pr.url };
+      if (task) {
+        laneMeta[lane].task = {
+          id: task.id,
+          status: task.status,
+          needsYou: task.needsYou ?? null,
+          attempts: task.attempts ?? 0,
+          mode: modeInfo("task", task, settings),
+          dependencies: deps.map((d) => depState(d, task.dependencyReasons?.[d] ?? null, taskById, settings)),
+        };
+      }
 
       for (const [ri, r] of rs.entries()) {
         const seq = li * 1000 + ri;
@@ -843,7 +899,9 @@ export function buildModel(snap: Snapshot): Model {
           name: "cook",
           kind: "agent",
           owner: lane,
-          description: waitingOn.length
+          description: task.needsYou
+            ? `parked, needs you: ${task.needsYou}`
+            : waitingOn.length
             ? `waiting on ${waitingOn.map((d) => (order.taskIds.includes(d) ? d : `${d} (other order)`)).join(", ")}`
             : "queued: ready for the loop",
           status: "queued",
@@ -901,6 +959,9 @@ export function buildModel(snap: Snapshot): Model {
       order_status: status,
       needs_open: orderNeeds.filter((n) => !n.resolvedAt).length,
       needs_broken: orderNeeds.filter((n) => !n.resolvedAt && n.severity === "broken").length,
+      mode: isTaskOrder && tasks[0]?.session ? modeInfo("session", tasks[0], settings) : null,
+      completed: isTaskOrder && tasks.length > 0 && tasks.every((t) => t.status === "completed"),
+      task_count: tasks.length,
     });
     model.details.set(order.id, {
       session,

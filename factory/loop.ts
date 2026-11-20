@@ -437,7 +437,7 @@ export async function runLoop(
       }
     }
     if (generation !== seen) return "retry";
-    if (pausedUntil > now()) return "nothing";
+    if (pausedUntil > now() || current.paused) return "nothing";
 
     let started = false;
     for (const c of candidates) {

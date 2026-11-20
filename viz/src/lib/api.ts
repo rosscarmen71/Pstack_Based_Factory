@@ -135,3 +135,80 @@ export function fetchEnvelopes(adwId: string): Promise<Envelope[]> {
 export function fetchGates(adwId: string): Promise<GateResult[]> {
   return getJson(`/api/sessions/${encodeURIComponent(adwId)}/gates`) as Promise<GateResult[]>
 }
+
+// ── Factory controls ─────────────────────────────────────────────────────────
+
+import type { DeletePreview, DeleteReport } from '../../../factory/delete-task'
+import type { LoopState } from '../../../factory/loop'
+import type { ModeInfo, Settings } from '../../../factory/settings'
+import type { TaskMode } from '../../../factory/tasks.schema'
+
+export type { DeletePreview, DeleteReport, LoopState, ModeInfo, Settings, TaskMode }
+
+/** GET /api/factory: the factory-wide switches and what the loop is doing right now. */
+export interface FactoryState {
+  settings: Settings
+  loop: LoopState
+  projects: string[]
+  maxAgentCap: number
+}
+
+/** Sends a request with an optional JSON body and returns the parsed JSON answer; throws the server's error text. */
+async function call<T>(method: 'POST' | 'DELETE', url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null
+  if (!res.ok) throw new Error(data?.error ?? `${method} ${url} → ${res.status}`)
+  return data as T
+}
+
+const enc = encodeURIComponent
+
+export function fetchFactory(): Promise<FactoryState> {
+  return getJson('/api/factory') as Promise<FactoryState>
+}
+
+export function updateFactory(patch: Partial<Pick<Settings, 'defaultMode' | 'agentCap' | 'paused'>>): Promise<unknown> {
+  return call('POST', '/api/factory', patch)
+}
+
+/** Sets a level's mode, or clears it (null) so the level inherits again. */
+export function setMode(level: 'projects' | 'sessions' | 'tasks', id: string, mode: TaskMode | null): Promise<unknown> {
+  return call('POST', `/api/${level}/${enc(id)}/mode`, { mode })
+}
+
+export function previewTaskDelete(id: string): Promise<DeletePreview> {
+  return getJson(`/api/tasks/${enc(id)}/delete-preview`) as Promise<DeletePreview>
+}
+
+export function previewSessionDelete(adwId: string): Promise<DeletePreview[]> {
+  return getJson(`/api/sessions/${enc(adwId)}/delete-preview`) as Promise<DeletePreview[]>
+}
+
+export function deleteTask(id: string): Promise<DeleteReport> {
+  return call('DELETE', `/api/tasks/${enc(id)}`)
+}
+
+export function deleteSession(adwId: string): Promise<{ session: string; deleted: DeleteReport[] }> {
+  return call('DELETE', `/api/sessions/${enc(adwId)}`)
+}
+
+export function completeTask(id: string): Promise<unknown> {
+  return call('POST', `/api/tasks/${enc(id)}/complete`)
+}
+
+/** Un-parks a task the loop parked after a failure. */
+export function retryTask(id: string): Promise<unknown> {
+  return call('POST', `/api/tasks/${enc(id)}/retry`)
+}
+
+export function addDependency(id: string, dependency: string, reason: string): Promise<unknown> {
+  return call('POST', `/api/tasks/${enc(id)}/dependencies`, { add: dependency, reason })
+}
+
+export function removeDependency(id: string, dependency: string): Promise<unknown> {
+  return call('POST', `/api/tasks/${enc(id)}/dependencies`, { remove: dependency })
+}

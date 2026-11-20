@@ -65,7 +65,9 @@ export function dependencyCandidates(tasks: Task[], forId: string | null = null)
 
 /** Returns human-readable problems with making `deps` the dependencies of task `id`; empty means it may be written. */
 export function checkDependencies(tasks: Task[], id: string, deps: Record<string, string>): string[] {
-  if (!tasks.some((t) => t.id === id)) return [`no task "${id}"`];
+  const target = tasks.find((t) => t.id === id);
+  if (!target) return [`no task "${id}"`];
+  if (target.status === "completed") return [`"${id}" is completed, which is final: its dependencies no longer change`];
   const errors: string[] = [];
   for (const [dep, reason] of Object.entries(deps)) {
     const task = tasks.find((t) => t.id === dep);

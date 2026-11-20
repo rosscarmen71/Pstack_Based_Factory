@@ -288,9 +288,22 @@ every half second.
   milestones, token usage and the agent's live feed. **Take over in Claude Code** opens Terminal running
   `claude --resume` on that run. While the run is still going, that's a forked copy, and typing there doesn't reach
   the running agent.
-- **Top bar.** Shows whether `bun run loop` is running.
+- **Top bar.** Shows whether `bun run loop` is running, how many agents are running out of how many are allowed
+  (change the cap there), the factory's default mode, and a pause button: paused, the loop starts nothing new and
+  running agents finish. A usage-limit pause shows there with the time it resumes.
+- **Modes.** A hands-on / hands-off switch sits on each level: the top bar (factory default), a project's heading,
+  a session's card and a task's row. A level that sets its own mode says what it overrides and has a reset that
+  makes it inherit again.
+- **Sessions.** The × on a session card deletes the session and every task in it, after a confirmation that lists
+  what will be stopped, closed and erased. A session whose tasks are all completed moves into a collapsed
+  "Completed" group at the bottom of its project.
+- **Tasks.** The session page has a row per task: its state, its mode, each dependency with the reason it exists and
+  what it is still waiting for, and buttons to retry a parked task, mark a task completed, delete it, and add or
+  remove a dependency. A dependency that would make two tasks wait for each other is refused. Completed tasks are
+  greyed out and stay for their history.
 
-It never writes to the factory's files. Its only writes are `viz/.needs-history.jsonl`, its own record of stuck tasks,
+It writes to the factory's files only through those controls (`factory/tasks.json` and `factory/settings.json`). Its
+other writes are `viz/.needs-history.jsonl`, its own record of stuck tasks,
 and the Terminal window that Take over opens. The first Take over makes macOS ask you to allow controlling Terminal.
 
 ### CI
