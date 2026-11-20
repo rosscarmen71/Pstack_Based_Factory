@@ -1,10 +1,13 @@
 // Factory settings the engineer toggles: the hands-on / hands-off mode at each level, and the agent cap.
 // File-backed like tasks.store.ts: re-read on every use, written atomically. A missing file means the defaults.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { settingsPath } from "./home.ts";
 import { TASK_MODES, type Task, type TaskMode } from "./tasks.schema.ts";
 
-export const SETTINGS_PATH = new URL("./settings.json", import.meta.url).pathname;
+/** The factory-wide settings live in the factory's home, shared by every project. */
+export const SETTINGS_PATH = settingsPath();
 export const DEFAULT_AGENT_CAP = 3;
 
 export interface Settings {
@@ -96,7 +99,7 @@ export interface SettingsStore {
   update(change: (current: Settings) => Settings): Settings;
 }
 
-export function settingsStore(path: string = SETTINGS_PATH): SettingsStore {
+export function settingsStore(path: string = settingsPath()): SettingsStore {
   const load = (): Settings => {
     if (!existsSync(path)) return structuredClone(DEFAULT_SETTINGS);
     let parsed: unknown;
@@ -116,6 +119,7 @@ export function settingsStore(path: string = SETTINGS_PATH): SettingsStore {
       const next = change(load());
       const errors = validateSettings(next);
       if (errors.length > 0) throw new Error(`invalid settings:\n- ${errors.join("\n- ")}`);
+      mkdirSync(dirname(path), { recursive: true });
       const tmp = `${path}.tmp`;
       writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
       renameSync(tmp, path); // atomic: readers never see a half-written file
