@@ -7,6 +7,7 @@ import {
   agentCommands,
   agentRunner,
   ALLOWED_TOOLS,
+  commandTools,
   LOOP_IDLE_MS,
   main,
   PATCH_CMD,
@@ -1231,6 +1232,11 @@ describe("ALLOWED_TOOLS", () => {
     for (const t of expected) expect(ALLOWED_TOOLS).toContain(t);
   });
 
+  test("includes the read-only inspection helpers every project's agents may use", () => {
+    const names = ["grep", "sort", "uniq", "diff", "cut", "tr", "basename", "dirname", "pwd", "which", "file", "stat", "realpath"];
+    for (const name of names) expect(ALLOWED_TOOLS).toContain(`Bash(${name} *)`);
+  });
+
   test("includes Agent so cook can launch the independent verifier subagent", () => {
     expect(ALLOWED_TOOLS).toContain("Agent");
   });
@@ -1239,6 +1245,18 @@ describe("ALLOWED_TOOLS", () => {
     for (const t of ["Bash(*)", "Bash(python3 *)", "Bash(sed *)", "Bash(rm *)", "Bash(curl *)"]) {
       expect(ALLOWED_TOOLS).not.toContain(t);
     }
+  });
+
+  test("has no rule for commands that can run other commands or search-and-exec", () => {
+    for (const name of ["find", "awk", "sh", "bash", "zsh"]) {
+      expect(ALLOWED_TOOLS).not.toContain(`Bash(${name} *)`);
+      expect(ALLOWED_TOOLS).not.toContain(`Bash(${name})`);
+    }
+  });
+
+  test("commandTools turns each project command into a bare and an argument rule", () => {
+    expect(commandTools(["conda", "pytest"])).toEqual(["Bash(conda *)", "Bash(conda)", "Bash(pytest *)", "Bash(pytest)"]);
+    expect(commandTools([])).toEqual([]);
   });
 
   test("AGENT_CMD passes the joined list after --allowedTools", () => {

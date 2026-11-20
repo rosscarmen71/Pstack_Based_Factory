@@ -1,8 +1,8 @@
 // Runs the factory: one scheduler loop per registered project, each touching only its own repository. Projects
 // added to the registry while it runs are picked up by themselves; one that is removed has its loop stopped.
 
-import { factoryHome, launcherPath, settingsPath } from "./home.ts";
-import { agentCommands, agentRunner, cleanUpOrphans, prRunner, runLoop, writeLoopState } from "./loop.ts";
+import { factoryHome, launcherPath, projectPaths, settingsPath } from "./home.ts";
+import { type AgentCommands, agentCommands, agentRunner, cleanUpOrphans, commandTools, prRunner, runLoop, writeLoopState } from "./loop.ts";
 import { type Project, type ProjectRegistry, projectContext, projectRegistry, waitingOnProjects } from "./projects.ts";
 import { settingsStore } from "./settings.ts";
 
@@ -80,23 +80,36 @@ export async function supervise({ registry, runProject, log = () => {}, signal, 
   await Promise.allSettled([...running.values()].map((l) => l.done));
 }
 
+/**
+ * The three agent commands for one project, read from the registry each time so a change to its allowedCommands
+ * reaches the next agent without restarting the loop. The skills reach the queue through the factory's own command
+ * and read it from the project's folder; the project's extra commands are added on top of the built-in list.
+ */
+export function projectCommands(name: string, registry: ProjectRegistry, home: string = factoryHome()): AgentCommands {
+  const allowed = registry.get(name)?.allowedCommands ?? [];
+  return agentCommands([`Bash(${launcherPath(home)} *)`, ...commandTools(allowed)], [projectPaths(name, home).dir]);
+}
+
 /** The real runner: this project's scheduler, with its own queue, PRs, worktrees and state file. */
 export function projectRunner(registry: ProjectRegistry = projectRegistry(), home: string = factoryHome()): ProjectRunner {
   return async (project, signal) => {
     const ctx = projectContext(project, home);
     const log = (m: string) => console.log(`[${project.name}] ${m}`);
     const print = (text: string) => console.log(`[${project.name}] ${text}`);
-    // The skills reach the queue through the factory's own command and read it from the project's folder.
-    const commands = agentCommands([`Bash(${launcherPath(home)} *)`], [ctx.paths.dir]);
     // Worktrees left by a loop that died: nothing is running in them any more.
     await ctx.workspaces.prune();
     const settings = settingsStore(settingsPath(home));
-    await runLoop(ctx.store, agentRunner(commands.cook, print, ctx.workspaces), log, {
+    await runLoop(ctx.store, agentRunner(() => projectCommands(project.name, registry, home).cook, print, ctx.workspaces), log, {
       signal,
       prs: ctx.prs,
       attempts: ctx.attempts,
       audit: ctx.audit,
-      runPr: prRunner(commands.review, commands.patch, print, ctx.workspaces),
+      runPr: prRunner(
+        () => projectCommands(project.name, registry, home).review,
+        () => projectCommands(project.name, registry, home).patch,
+        print,
+        ctx.workspaces,
+      ),
       // Paused when the whole factory is, or when this project is.
       settings: () => {
         const s = settings.load();

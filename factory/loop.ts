@@ -35,7 +35,25 @@ export const ALLOWED_TOOLS: string[] = [
   "Bash(wc *)",
   "Bash(sed -n *)",
   "Bash(echo *)",
+  "Bash(grep *)",
+  "Bash(sort *)",
+  "Bash(uniq *)",
+  "Bash(diff *)",
+  "Bash(cut *)",
+  "Bash(tr *)",
+  "Bash(basename *)",
+  "Bash(dirname *)",
+  "Bash(pwd *)",
+  "Bash(which *)",
+  "Bash(file *)",
+  "Bash(stat *)",
+  "Bash(realpath *)",
 ];
+
+/** The allow-list rules for one project's extra commands: each name both on its own and with arguments. */
+export function commandTools(commands: string[]): string[] {
+  return commands.flatMap((name) => [`Bash(${name} *)`, `Bash(${name})`]);
+}
 
 /** Flags that make the agent end with a schema-checked result report in a JSON envelope on stdout. */
 const REPORT_FLAGS: string[] = ["--output-format", "json", "--json-schema", JSON.stringify(AGENT_RESULT_SCHEMA)];
@@ -562,16 +580,20 @@ async function spawnIn(workspaces: Workspaces | undefined, name: string, cmd: st
   }
 }
 
+/** An argv template, or a thunk that rebuilds it at each run so a registry change applies to the next agent. */
+export type Template = string[] | (() => string[]);
+const resolve = (t: Template): string[] => (typeof t === "function" ? t() : t);
+
 /** Builds a runner that spawns the given argv template with `{id}` substituted in each arg. */
-export function agentRunner(template: string[], print: (text: string) => void = console.log, workspaces?: Workspaces): Runner {
-  return (task) => spawnIn(workspaces, worktreeName("cook", task.id), template.map((a) => a.replaceAll("{id}", task.id)), print);
+export function agentRunner(template: Template, print: (text: string) => void = console.log, workspaces?: Workspaces): Runner {
+  return (task) => spawnIn(workspaces, worktreeName("cook", task.id), resolve(template).map((a) => a.replaceAll("{id}", task.id)), print);
 }
 
 /** Builds a PR runner from the review and patch argv templates, with `{pr}` substituted in each arg. */
-export function prRunner(reviewCmd: string[], patchCmd: string[], print: (text: string) => void = console.log, workspaces?: Workspaces): PrRunner {
+export function prRunner(reviewCmd: Template, patchCmd: Template, print: (text: string) => void = console.log, workspaces?: Workspaces): PrRunner {
   return (pr, action) => {
     const template = action === "review" ? reviewCmd : patchCmd;
-    return spawnIn(workspaces, worktreeName("pr", pr.number), template.map((a) => a.replaceAll("{pr}", String(pr.number))), print);
+    return spawnIn(workspaces, worktreeName("pr", pr.number), resolve(template).map((a) => a.replaceAll("{pr}", String(pr.number))), print);
   };
 }
 

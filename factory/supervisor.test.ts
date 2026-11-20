@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { installLauncher, installSkills, migrateLegacy, runCli, type CliEnv } from "./cli.ts";
 import { launcherPath, projectPaths, registryPath, settingsPath } from "./home.ts";
 import { projectRegistry } from "./projects.ts";
-import { PROJECT_POLL_MS, supervise } from "./supervisor.ts";
+import { PROJECT_POLL_MS, projectCommands, supervise } from "./supervisor.ts";
 import { bunGitIn } from "./worktrees.ts";
 
 let home: string;
@@ -104,6 +104,34 @@ describe("supervise", () => {
   });
 });
 
+describe("projectCommands", () => {
+  const allowed = (cmd: string[]): string => cmd[cmd.indexOf("--allowedTools") + 1] ?? "";
+
+  test("adds a project's allowedCommands to all three agent commands, read fresh each call", () => {
+    const r = reg();
+    r.add({ name: "acme/a", path: "/a" });
+    r.add({ name: "acme/b", path: "/b" });
+
+    for (const kind of ["cook", "review", "patch"] as const) {
+      const tools = allowed(projectCommands("acme/a", r, home)[kind]);
+      for (const name of ["conda", "python", "pytest"]) expect(tools).not.toContain(`Bash(${name} *)`);
+    }
+
+    // A change to the registry reaches the very next build, no loop restart.
+    r.setAllowedCommands("acme/a", ["conda", "python", "pytest"]);
+    for (const kind of ["cook", "review", "patch"] as const) {
+      const tools = allowed(projectCommands("acme/a", r, home)[kind]);
+      for (const name of ["conda", "python", "pytest"]) {
+        expect(tools).toContain(`Bash(${name} *)`);
+        expect(tools).toContain(`Bash(${name})`);
+      }
+      // Another project's commands carry none of them.
+      const other = allowed(projectCommands("acme/b", r, home)[kind]);
+      for (const name of ["conda", "python", "pytest"]) expect(other).not.toContain(`Bash(${name} *)`);
+    }
+  });
+});
+
 describe("factory command", () => {
   let repo: string;
   let userHome: string;
@@ -158,6 +186,26 @@ describe("factory command", () => {
     expect(JSON.parse(readFileSync(path, "utf8"))[1].dependencies).toEqual(["a"]);
     expect(await runCli(["deps", "set", "a", JSON.stringify({ b: "x" })], env)).toBe(1);
     expect(err.at(-1)).toContain("deadlock");
+  });
+
+  test("commands shows, replaces and clears the repository's project's allowed commands", async () => {
+    expect(await runCli(["commands", "set", "conda", "python", "pytest"], env)).toBe(0);
+    expect(out).toEqual(["conda\npython\npytest"]);
+    out.length = 0;
+    expect(await runCli(["commands"], env)).toBe(0);
+    expect(out).toEqual(["conda\npython\npytest"]);
+    expect(reg().get("acme/shop-api")?.allowedCommands).toEqual(["conda", "python", "pytest"]);
+    out.length = 0;
+    expect(await runCli(["commands", "set"], env)).toBe(0); // no names clears the list
+    expect(reg().get("acme/shop-api")?.allowedCommands).toEqual([]);
+    expect(await runCli(["commands", "set", "sudo"], env)).toBe(1);
+    expect(err.at(-1)).toContain("sudo");
+  });
+
+  test("commands in a folder that is no repository exits non-zero with a message", async () => {
+    expect(await runCli(["commands"], { ...env, cwd: home })).toBe(1);
+    expect(err.at(-1)).toContain("not inside a git repository");
+    expect(await runCli(["commands", "set", "conda"], { ...env, cwd: home })).toBe(1);
   });
 
   test("an unknown command prints the usage", async () => {

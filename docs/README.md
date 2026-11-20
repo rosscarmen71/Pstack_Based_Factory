@@ -443,8 +443,14 @@ the main checkout's, so the visualizer's history and Take over still find it.
 ### What an agent is allowed to do
 
 Each agent runs as `claude -p "/<skill> <target>"` with a fixed list of allowed tools: file reading and editing,
-subagents, and Bash limited to `git`, `gh`, `bun`, the factory's own `factory` command, and a few read-only helpers.
-It ends with a schema-checked report: `processed`, or `skipped` with a reason.
+subagents, and Bash limited to `git`, `gh`, `bun`, the factory's own `factory` command, and a few read-only helpers
+(`grep`, `sort`, `uniq`, `diff`, `cut`, `tr`, `basename`, `dirname`, `pwd`, `which`, `file`, `stat`, `realpath`, and
+the like). It ends with a schema-checked report: `processed`, or `skipped` with a reason.
+
+A project whose checks need another tool adds it to its own `allowedCommands`: run `factory commands set conda python
+pytest` in the repository, or `factory commands` to see the list. Each entry must be a bare command name; `sudo`, the
+shells, `env`, `xargs` and `eval` are refused, as are `find` and `awk`, because they can run other commands. The
+supervisor re-reads the list at every agent start, so a change reaches the next run without restarting the loop.
 
 ## What happens to a pull request
 

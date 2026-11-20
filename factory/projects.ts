@@ -27,6 +27,8 @@ export interface Project {
   paused: boolean;
   /** ISO 8601 timestamp. */
   addedAt: string;
+  /** Extra bare commands this project's agents may run, on top of the factory's built-in list. Missing means none. */
+  allowedCommands?: string[];
 }
 
 export interface ProjectRegistry {
@@ -38,9 +40,24 @@ export interface ProjectRegistry {
   setPaused(name: string, paused: boolean): Project;
   /** Replaces what the project depends on. Throws on an unknown project, itself, or a cycle. */
   setDependsOn(name: string, dependsOn: string[]): Project;
+  /**
+   * Replaces the extra commands this project's agents may run. Each must be a bare command name; sudo and the
+   * shells are refused. Throws naming the refused entry, and leaves the stored list unchanged.
+   */
+  setAllowedCommands(name: string, commands: string[]): Project;
 }
 
 const NAME = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+/** A single allowed command: a bare name only, so it cannot smuggle arguments, a path or a second command. */
+const COMMAND_NAME = /^[A-Za-z0-9._-]+$/;
+/** Commands that could run anything else, so a project may never add them. */
+const FORBIDDEN_COMMANDS = new Set(["sudo", "sh", "bash", "zsh", "env", "xargs", "eval"]);
+
+/** Throws naming `command` when it is not a bare name, or is one that could run other commands. */
+export function checkAllowedCommand(command: string): void {
+  if (!COMMAND_NAME.test(command)) throw new Error(`cannot allow "${command}": a command must be a bare name like "pytest"`);
+  if (FORBIDDEN_COMMANDS.has(command)) throw new Error(`cannot allow "${command}": it can run other commands`);
+}
 
 function isProject(v: unknown): v is Project {
   if (typeof v !== "object" || v === null) return false;
@@ -53,7 +70,8 @@ function isProject(v: unknown): v is Project {
     Array.isArray(p.dependsOn) &&
     p.dependsOn.every((d) => typeof d === "string") &&
     typeof p.paused === "boolean" &&
-    typeof p.addedAt === "string"
+    typeof p.addedAt === "string" &&
+    (p.allowedCommands === undefined || (Array.isArray(p.allowedCommands) && p.allowedCommands.every((c) => typeof c === "string")))
   );
 }
 
@@ -80,7 +98,8 @@ export function projectRegistry(path: string = registryPath()): ProjectRegistry 
       throw new Error(`${path} is not valid JSON: ${(e as Error).message}`);
     }
     if (!Array.isArray(parsed) || !parsed.every(isProject)) throw new Error(`${path} must hold a list of projects`);
-    return parsed;
+    // A project with no stored list reads as one that allows no extra commands.
+    return parsed.map((p) => ({ ...p, allowedCommands: p.allowedCommands ?? [] }));
   };
   const write = (projects: Project[]) => {
     mkdirSync(dirname(path), { recursive: true });
@@ -133,6 +152,11 @@ export function projectRegistry(path: string = registryPath()): ProjectRegistry 
         const through = dependencyCycle(all, name, wanted);
         if (through) throw new Error(`${name} cannot depend on ${through}: ${through} already waits on ${name}`);
         return { ...p, dependsOn: wanted };
+      }),
+    setAllowedCommands: (name, commands) =>
+      change(name, (p) => {
+        for (const c of commands) checkAllowedCommand(c); // throws before anything is written
+        return { ...p, allowedCommands: commands };
       }),
   };
 }

@@ -66,6 +66,28 @@ describe("registry", () => {
     writeFileSync(registryPath(home), JSON.stringify([{ name: "x" }]));
     expect(() => reg().list()).toThrow("list of projects");
   });
+
+  test("a project without allowedCommands loads with an empty list; setting them leaves the other fields alone", () => {
+    const stored = { name: "acme/api", path: "/a", dependsOn: ["acme/dep"], paused: true, addedAt: AT.toISOString() };
+    writeFileSync(registryPath(home), JSON.stringify([stored]));
+    expect(reg().get("acme/api")?.allowedCommands).toEqual([]);
+    const updated = reg().setAllowedCommands("acme/api", ["conda", "python", "pytest"]);
+    expect(updated.allowedCommands).toEqual(["conda", "python", "pytest"]);
+    const { allowedCommands, ...rest } = reg().get("acme/api")!;
+    expect(rest).toEqual(stored); // name, path, dependsOn, paused and addedAt are untouched
+    expect(reg().setAllowedCommands("acme/api", []).allowedCommands).toEqual([]);
+  });
+
+  test("setAllowedCommands refuses a non-bare or dangerous entry, names it, and keeps the stored list", () => {
+    const r = reg();
+    r.add({ name: "acme/api", path: "/a" });
+    r.setAllowedCommands("acme/api", ["conda"]);
+    for (const bad of ["rm -rf", "Bash(x)", "*", "sudo", "sh", "bash", "zsh", "env", "xargs", "eval"]) {
+      expect(() => r.setAllowedCommands("acme/api", ["conda", bad])).toThrow(bad);
+      expect(reg().get("acme/api")?.allowedCommands).toEqual(["conda"]);
+    }
+    expect(() => r.setAllowedCommands("acme/zzz", ["conda"])).toThrow('no project "acme/zzz"');
+  });
 });
 
 describe("repositories", () => {

@@ -6,6 +6,7 @@
 //   factory register [path]       make the repository at path (default: here) a project
 //   factory projects              list the projects
 //   factory tasks-file            print the path of this repository's task queue (registers it if needed)
+//   factory commands [set <...>]  show or replace the extra commands this repository's agents may run
 //   factory deps <...>            the dependency commands (candidates, set, blockers) for this repository
 
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
@@ -25,6 +26,8 @@ const USAGE = `usage:
   factory register [path]
   factory projects
   factory tasks-file
+  factory commands
+  factory commands set <name>...
   factory deps candidates [--for <task-id>]
   factory deps set <task-id> '{"<dependency-id>": "<one-line reason>"}'
   factory deps blockers <task-id>`;
@@ -140,6 +143,21 @@ export async function runCli(args: string[], env: CliEnv): Promise<number> {
       const project = await registerRepo(env.cwd, env.registry);
       env.out(projectContext(project, env.home).paths.tasks);
       return 0;
+    }
+    if (command === "commands") {
+      const project = await registerRepo(env.cwd, env.registry);
+      const [sub, ...names] = rest;
+      if (sub === "set") {
+        const updated = env.registry.setAllowedCommands(project.name, names);
+        env.out((updated.allowedCommands ?? []).join("\n"));
+        return 0;
+      }
+      if (sub === undefined) {
+        env.out((env.registry.get(project.name)?.allowedCommands ?? []).join("\n"));
+        return 0;
+      }
+      env.err("usage:\n  factory commands\n  factory commands set <name>...");
+      return 1;
     }
     if (command === "deps") {
       const project = await registerRepo(env.cwd, env.registry);

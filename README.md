@@ -266,10 +266,17 @@ holding resumes where it left off. Its state is kept in `customize-agents.json` 
 
 Each run gets `--allowedTools` from `ALLOWED_TOOLS` in `factory/loop.ts`: `Read`, `Edit`, `Write`, `Glob`, `Grep`,
 `Agent` (for the independent verifier subagent), and Bash limited to `git`, `gh`, `bun`, `jq`, `ls`, `cat`, `head`,
-`tail`, `wc`, `sed -n` and `echo`. The factory adds its own `factory` command, which the skills call to find the task
-queue, and passes the project's folder with `--add-dir` so the agent can read that queue. Because Bash is limited to
-`bun` for running checks, a repository whose checks need another tool (`npm`, `pytest`, `cargo`) cannot be built by
-`cook` yet.
+`tail`, `wc`, `sed -n`, `echo`, and the read-only helpers `grep`, `sort`, `uniq`, `diff`, `cut`, `tr`, `basename`,
+`dirname`, `pwd`, `which`, `file`, `stat` and `realpath`. The factory adds its own `factory` command, which the skills
+call to find the task queue, and passes the project's folder with `--add-dir` so the agent can read that queue.
+
+**Per-project commands.** A repository whose checks need another tool (`conda`, `python`, `pytest`, `cargo`) adds it to
+its project's `allowedCommands`, stored in `projects.json`. Run `factory commands` in the repository to see the list and
+`factory commands set <name>...` to replace it (`factory commands set` with no names clears it). Each name must be a bare
+command (matching `/^[A-Za-z0-9._-]+$/`); `sudo`, `sh`, `bash`, `zsh`, `env`, `xargs` and `eval` are refused because they
+can run anything else, and `find` and `awk` are left out for the same reason. The supervisor turns each name into
+`Bash(<name> *)` and `Bash(<name>)` for that project's agents and reads the list at every agent start, so a change
+applies to the next `cook`, `taste_test` or `remake` run without restarting the loop.
 
 ### Result Report
 
