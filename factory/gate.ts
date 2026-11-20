@@ -83,9 +83,9 @@ export function blockers(task: Pick<Task, "dependencies">, ctx: GateContext): De
   return task.dependencies.map((d) => dependencyState(d, ctx)).filter((s) => !s.met);
 }
 
-/** A pending task may start once every dependency is met. Each is judged by its own mode. */
-export function canStart(task: Pick<Task, "status" | "dependencies">, ctx: GateContext): boolean {
-  return task.status === "pending" && blockers(task, ctx).length === 0;
+/** A pending task may start once every dependency is met, each judged by its own mode. A parked task waits for the engineer. */
+export function canStart(task: Pick<Task, "status" | "dependencies" | "needsYou">, ctx: GateContext): boolean {
+  return task.status === "pending" && !task.needsYou && blockers(task, ctx).length === 0;
 }
 
 /**

@@ -152,13 +152,21 @@ Tests are not mandatory for the features the factory builds. `cook` proves each 
 
 ### The Loop
 
-Each turn, the loop takes one candidate: a PR that needs a patch, else a PR that needs a review, else a ready task. Within each of those it takes the oldest by `createdAt`; tasks without `createdAt` go last.
+The loop is a scheduler. Every poll (60 s, and at once whenever an agent finishes) it reads the tasks and the PRs, ranks what is ready, and starts agents until `agentCap` are running (3 by default, set in `factory/settings.json`). It never waits on an agent, so it keeps noticing new tasks and PRs while agents work. The ranking: PRs that need a patch, then PRs that need a review, then ready tasks; within each, the oldest by `createdAt`, and tasks without `createdAt` go last. Two tasks with a dependency between them never run together, because the dependent is not ready until the gate lets it through.
+
+**One worktree per agent.** Each agent runs in its own git worktree under `.worktrees/` (gitignored), created from `origin/main` and removed when the run ends, so parallel agents never share a checkout and never touch yours. The task queue and `node_modules` are linked into it. Its transcripts are moved next to the main checkout's when it is removed.
 
 **Tasks.** The loop sets the task to `in_progress` and runs `/cook <id>`.
 
 - A `processed` result moves the task to `pr`.
-- A failure (a non-zero exit, or exit 0 with no result report) or a `skipped` result returns the task to
-  `pending` and **stops the loop**. A skip records its reason on the task.
+- A failure (a non-zero exit, or exit 0 with no result report) returns the task to `pending`. In hands-off mode it is tried again, up to 3 attempts in all; after that, and on the first failure in hands-on mode, it is **parked**: it gets a `needsYou` note and is not started again until you clear it (`POST /api/tasks/<id>/retry` on the visualizer's server, or remove `needsYou` and `attempts` from the task). A `skipped` result parks the task at once and records its reason.
+- One failure never stops the loop: everything that does not depend on the parked task keeps running.
+
+**Usage limit.** A run that dies on your Claude usage limit counts as no attempt. The loop starts nothing new until the limit resets (30 minutes when the message gives no time), then carries on by itself.
+
+**After a crash.** A task found `in_progress` with no agent goes back to `pending` with no attempt counted; its worktree and, if it has no PR yet, its half-finished branch are discarded.
+
+The loop publishes what is running, and any usage-limit pause, in `factory/loop-state.json`.
 
 **PRs.** `pr-state.ts` decides what each open PR needs. The first matching rule wins:
 
@@ -193,7 +201,7 @@ PRs. The factory posts as your GitHub login, so it only acts on comments that st
 - A PR's attempt count is dropped once the PR is no longer open.
 - If listing PRs fails, the loop logs it and continues with tasks only.
 
-When there's nothing to do, the loop sleeps `LOOP_IDLE_MS` (60 s) and checks again.
+Between polls the loop sleeps `LOOP_IDLE_MS` (60 s), cut short when an agent finishes. On Ctrl-C it starts nothing new and exits once the running agents have finished.
 
 **One loop at a time.** The loop writes its pid to `factory/loop.lock`. A second `bun run loop` exits at once, naming
 the running loop's pid and start time. A lock left by a killed loop is replaced.

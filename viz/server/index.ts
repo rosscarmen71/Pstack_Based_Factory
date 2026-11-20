@@ -11,7 +11,7 @@
  *   - DELETE /api/tasks/:id deletes one task for good: it stops its agent, closes its PR, deletes its branch and
  *     erases its records (factory/delete-task.ts). DELETE /api/sessions/:adw_id does that for every task of the
  *     session. GET /api/tasks/:id/delete-preview says what a delete would do. POST /api/tasks/:id/complete marks a
- *     task completed by hand.
+ *     task completed by hand. POST /api/tasks/:id/retry un-parks a task the loop parked after a failure.
  *   - POST /api/sessions/:adw_id/project writes the optional `project` field of each task in that order, in
  *     factory/tasks.json (through the task store, so it never clobbers the loop's own writes).
  * factory-source.ts also keeps viz/.needs-history.jsonl, and the agent manager keeps viz/.customize-agents.json.
@@ -26,7 +26,7 @@ import { deleteTask, previewDelete, type DeleteReport } from "../../factory/dele
 import { attemptsStore } from "../../factory/pr-attempts.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
 import { groupOrders } from "./factory-model.ts";
-import { customize, invalidate, isRunSession, load, readFeed, removeRunTranscripts, REPO_ROOT } from "./factory-source.ts";
+import { customize, invalidate, isRunSession, load, readFeed, removeRunTranscripts, runCwd } from "./factory-source.ts";
 import { parseProjectBody, setOrderProject } from "./projects.ts";
 import type { AnswerBody, ReplyBody } from "../shared/customize.ts";
 import type { ApiError, EventsPage, HealthResponse } from "../shared/types.ts";
@@ -85,7 +85,8 @@ async function serveStatic(req: Request): Promise<Response> {
 
 /** Opens macOS Terminal in the repo, resuming the run's conversation (a fork while the run is still live). */
 async function openTerminal(sessionId: string, fork: boolean): Promise<void> {
-  const command = `cd ${shq(REPO_ROOT)} && ${CLAUDE_BIN} --resume ${sessionId}${fork ? " --fork-session" : ""}`;
+  // A live run's conversation lives with its worktree; a finished one's with the repo root.
+  const command = `cd ${shq(runCwd(sessionId))} && ${CLAUDE_BIN} --resume ${sessionId}${fork ? " --fork-session" : ""}`;
   const script = `tell application "Terminal"\n  activate\n  do script ${JSON.stringify(command)}\nend tell`;
   const proc = Bun.spawn(["osascript", "-e", script], { stdout: "ignore", stderr: "pipe" });
   const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
@@ -167,6 +168,18 @@ const server = Bun.serve({
         if (!report) return notFound(`no task ${param(req, "id")}`);
         invalidate();
         return json(report);
+      }),
+    },
+
+    // Un-parks a task the loop gave up on: clears its needs-you note and its failed-attempt count, so it may start again.
+    "/api/tasks/:id/retry": {
+      POST: safely((req) => {
+        const id = param(req, "id");
+        const store = fileStore();
+        if (!store.load().some((t) => t.id === id)) return notFound(`no task ${id}`);
+        store.update(id, { needsYou: undefined, attempts: undefined });
+        invalidate();
+        return json({ ok: true, id });
       }),
     },
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AGENT_RESULT_SCHEMA, parseAgentResult, toAuditOutcome } from "./agent-result";
+import { AGENT_RESULT_SCHEMA, parseAgentResult, parseUsageLimit, toAuditOutcome } from "./agent-result";
 
 const envelope = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
@@ -98,5 +98,27 @@ describe("AGENT_RESULT_SCHEMA", () => {
 
   test("has no top-level oneOf/allOf/anyOf, which the API rejects in a tool schema", () => {
     for (const key of ["oneOf", "allOf", "anyOf"]) expect(AGENT_RESULT_SCHEMA).not.toHaveProperty(key);
+  });
+});
+
+describe("parseUsageLimit", () => {
+  const envelope = (result: string, is_error = true) => JSON.stringify({ is_error, result });
+
+  test("reads the reset time from the epoch form, in seconds or milliseconds", () => {
+    expect(parseUsageLimit(envelope("Claude AI usage limit reached|1749924000"))).toEqual({ resetAt: 1749924000_000 });
+    expect(parseUsageLimit(envelope("Claude AI usage limit reached|1749924000000"))).toEqual({ resetAt: 1749924000_000 });
+  });
+
+  test("recognises a limit message with no reset time", () => {
+    expect(parseUsageLimit(envelope("You've hit your limit · resets 3pm"))).toEqual({ resetAt: null });
+    expect(parseUsageLimit(envelope("You\u2019ve hit your session limit"))).toEqual({ resetAt: null });
+    expect(parseUsageLimit("Claude AI usage limit reached")).toEqual({ resetAt: null });
+  });
+
+  test("is null for other errors, for successes that mention limits, and for empty output", () => {
+    expect(parseUsageLimit(envelope("Tool execution failed"))).toBeNull();
+    expect(parseUsageLimit(envelope("I documented the usage limit reached message", false))).toBeNull();
+    expect(parseUsageLimit("")).toBeNull();
+    expect(parseUsageLimit("exit 1")).toBeNull();
   });
 });

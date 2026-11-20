@@ -106,7 +106,7 @@ const lines = (text: string) =>
     .filter(Boolean);
 
 /** Deletes the task's `<type>/<id>` branches, locally and on origin. Returns the names deleted. */
-async function deleteBranches(id: string, git: NonNullable<DeleteDeps["git"]>, warnings: string[]): Promise<string[]> {
+export async function deleteBranches(id: string, git: NonNullable<DeleteDeps["git"]>, warnings: string[]): Promise<string[]> {
   const deleted: string[] = [];
   const local = await git(["for-each-ref", "--format=%(refname:short)", `refs/heads/*/${id}`]);
   const remote = await git(["for-each-ref", "--format=%(refname:short)", `refs/remotes/origin/*/${id}`]);

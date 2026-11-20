@@ -453,7 +453,7 @@ export function buildNeeds(snap: Snapshot, runs: Run[], sessionOfLane: (lane: st
       kind: "loop_stopped",
       severity: "broken",
       title: "Loop stopped",
-      description: `cook on ${r.target} ${r.status === "skipped" ? "skipped" : "failed"}: ${r.audit.reason ?? "no reason"}. The loop stops after this; fix it, then run bun run loop again.`,
+      description: `cook on ${r.target} ${r.status === "skipped" ? "skipped" : "failed"}: ${r.audit.reason ?? "no reason"}. The task is parked until you retry it (or until its retries run out, in hands-off mode).`,
       sessionId: sessionOfLane(r.lane),
       lane: r.lane,
       phaseId: r.id,

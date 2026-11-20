@@ -12,3 +12,6 @@ factory/audit-log.jsonl.tmp
 factory/tasks.json.tmp
 factory/settings.json
 factory/settings.json.tmp
+.worktrees/
+factory/loop-state.json
+factory/loop-state.json.tmp

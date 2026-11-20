@@ -12,6 +12,7 @@ import type { TaskTarget } from "../../factory/delete-task.ts";
 import { MAX_PR_ATTEMPTS } from "../../factory/pr-attempts.ts";
 import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, pendingRequest } from "../../factory/pr-state.ts";
 import { fileStore } from "../../factory/tasks.store.ts";
+import { claudeProjectDir, WORKTREES_DIR } from "../../factory/worktrees.ts";
 import type { Task } from "../../factory/tasks.schema.ts";
 import {
   buildModel,
@@ -74,7 +75,8 @@ export function runBelongsTo(command: NonNullable<ReturnType<typeof runCommand>>
  * Erases the transcripts (and their side folders) of every factory run that belongs to the target.
  * Only files that start with a factory command are ever touched. Returns how many runs were erased.
  */
-export function removeRunTranscripts(target: TaskTarget, dir: string = TRANSCRIPTS_DIR): number {
+export function removeRunTranscripts(target: TaskTarget, dir?: string): number {
+  if (dir === undefined) return transcriptDirs().reduce((n, d) => n + removeRunTranscripts(target, d.dir), 0);
   if (!existsSync(dir)) return 0;
   let removed = 0;
   for (const name of readdirSync(dir)) {
@@ -95,12 +97,45 @@ export function removeRunTranscripts(target: TaskTarget, dir: string = TRANSCRIP
   return removed;
 }
 
+/**
+ * Every folder that may hold this factory's transcripts: the main checkout's, plus one per live agent worktree
+ * (an agent runs in its own worktree, and Claude Code files transcripts by working directory). A worktree's
+ * transcripts are moved to the main folder when its run ends.
+ */
+export function transcriptDirs(): { dir: string; cwd: string }[] {
+  const dirs = [{ dir: TRANSCRIPTS_DIR, cwd: REPO_ROOT }];
+  if (process.env.FACTORY_TRANSCRIPTS_DIR || !existsSync(WORKTREES_DIR)) return dirs;
+  for (const name of readdirSync(WORKTREES_DIR)) {
+    const cwd = join(WORKTREES_DIR, name);
+    const dir = claudeProjectDir(cwd);
+    if (existsSync(dir)) dirs.push({ dir, cwd });
+  }
+  return dirs;
+}
+
+/** Where the run's transcript is and which checkout it ran in; null when there is no such transcript. */
+function findTranscript(sessionId: string): { path: string; cwd: string } | null {
+  if (!SESSION_ID.test(sessionId)) return null;
+  for (const { dir, cwd } of transcriptDirs()) {
+    const path = join(dir, `${sessionId}.jsonl`);
+    if (existsSync(path)) return { path, cwd };
+  }
+  return null;
+}
+
+/** The checkout to resume the run's conversation from: its worktree while it is live, else the repo root. */
+export const runCwd = (sessionId: string): string => findTranscript(sessionId)?.cwd ?? REPO_ROOT;
+
 function readTranscripts(): Transcript[] {
-  if (!existsSync(TRANSCRIPTS_DIR)) return [];
+  return transcriptDirs().flatMap(({ dir }) => readTranscriptsIn(dir));
+}
+
+function readTranscriptsIn(dir: string): Transcript[] {
+  if (!existsSync(dir)) return [];
   const out: Transcript[] = [];
-  for (const name of readdirSync(TRANSCRIPTS_DIR)) {
+  for (const name of readdirSync(dir)) {
     if (!name.endsWith(".jsonl")) continue;
-    const path = join(TRANSCRIPTS_DIR, name);
+    const path = join(dir, name);
     let st;
     try {
       st = statSync(path);
@@ -134,15 +169,13 @@ function readTranscripts(): Transcript[] {
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function isRunSession(sessionId: string): boolean {
-  if (!SESSION_ID.test(sessionId)) return false;
-  const path = join(TRANSCRIPTS_DIR, `${sessionId}.jsonl`);
-  return existsSync(path) && headIsRun(path);
+  const found = findTranscript(sessionId);
+  return found !== null && headIsRun(found.path);
 }
 
 export function readFeed(sessionId: string, after: number): { items: FeedItem[]; cursor: number } {
-  if (!SESSION_ID.test(sessionId)) return { items: [], cursor: after };
-  const path = join(TRANSCRIPTS_DIR, `${sessionId}.jsonl`);
-  if (!existsSync(path)) return { items: [], cursor: after };
+  const path = findTranscript(sessionId)?.path;
+  if (!path) return { items: [], cursor: after };
   const items = parseFeed(readFileSync(path, "utf8")).filter((it) => it.i > after);
   return { items, cursor: items.at(-1)?.i ?? after };
 }

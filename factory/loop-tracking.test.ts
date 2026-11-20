@@ -56,11 +56,15 @@ function memStore(tasks: Task[]) {
   return { store, tasks, updates };
 }
 
-/** Fake sleep that aborts the signal after `after` calls, so the loop runs `after` idle ticks. */
+/** Fake sleep that lets running agents settle, ignores sleeps the loop gave up on, and aborts after `after` idle polls. */
 function fakeSleep(after = 1) {
   const controller = new AbortController();
   let calls = 0;
+  let latest = 0;
   const sleep = async () => {
+    const mine = ++latest;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (mine !== latest) return;
     calls++;
     if (calls >= after) controller.abort();
   };

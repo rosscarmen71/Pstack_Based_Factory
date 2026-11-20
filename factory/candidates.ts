@@ -37,7 +37,7 @@ const stamp = (iso: string | undefined): number => {
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
 };
 
-interface Ranking {
+export interface Ranking {
   candidates: Candidate[];
   newlyExceeded: PullRequest[];
 }
@@ -70,6 +70,11 @@ function rank(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore, settin
   // Finish before starting: patches, then reviews, then new tasks; oldest first within each, ties by original order.
   ranked.sort((a, b) => a.group - b.group || (a.sortAt === b.sortAt ? a.index - b.index : a.sortAt < b.sortAt ? -1 : 1));
   return { candidates: ranked.map((r) => r.candidate), newlyExceeded };
+}
+
+/** Every candidate in loop order, plus the PRs that just hit the attempt limit and still need flagging. */
+export function rankAll(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore, settings: Settings = DEFAULT_SETTINGS): Ranking {
+  return rank(tasks, prs, attempts, settings);
 }
 
 /** Every candidate in loop order: patches, reviews, then new tasks that pass the start gate; oldest first in each. */

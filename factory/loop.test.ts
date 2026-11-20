@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,8 +10,13 @@ import {
   main,
   PATCH_CMD,
   prRunner,
+  readLoopState,
   REVIEW_CMD,
+  type LoopState,
+  MAX_TASK_ATTEMPTS,
   runLoop,
+  USAGE_LIMIT_FALLBACK_MS,
+  writeLoopState,
   type PrRunner,
   type RunResult,
   type Runner,
@@ -20,8 +25,10 @@ import { AGENT_RESULT_SCHEMA, type AgentResult } from "./agent-result.ts";
 import type { AuditEntry, AuditStore } from "./audit-log.ts";
 import { attemptsStore, MAX_PR_ATTEMPTS, type AttemptsStore } from "./pr-attempts.ts";
 import type { PrSource, PullRequest } from "./prs.ts";
+import { DEFAULT_SETTINGS, type Settings } from "./settings.ts";
 import type { Task, TaskStatus } from "./tasks.schema.ts";
 import type { TaskStore } from "./tasks.store.ts";
+import type { Workspaces } from "./worktrees.ts";
 
 const task = (id: string, status: TaskStatus = "pending", dependencies: string[] = []): Task => ({
   id,
@@ -78,17 +85,29 @@ function memStore(tasks: Task[]) {
   return { store, history, tasks };
 }
 
-/** Fake sleep that records its calls and aborts the signal after `after` of them (default: the first). */
+/**
+ * Fake sleep for a loop that polls while agents run. It lets everything already under way settle first; a sleep the
+ * loop gave up on (because an agent finished and it polled again) counts for nothing. Sleeps that do complete are
+ * the loop's idle polls: they are recorded, and the signal aborts after `after` of them (default: the first).
+ */
 function fakeSleep(after = 1, onCall: (n: number) => void = () => {}) {
   const controller = new AbortController();
   const calls: number[] = [];
+  let latest = 0;
   const sleep = async (ms: number) => {
+    const mine = ++latest;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (mine !== latest) return;
     calls.push(ms);
     onCall(calls.length);
     if (calls.length >= after) controller.abort();
   };
   return { sleep, calls, signal: controller.signal };
 }
+
+/** One agent at a time, for tests that assert an exact order. */
+const ONE_AT_A_TIME = { settings: (): Settings => ({ ...DEFAULT_SETTINGS, agentCap: 1 }) };
+const HANDS_OFF = { settings: (): Settings => ({ ...DEFAULT_SETTINGS, defaultMode: "hands-off" }) };
 
 describe("runLoop", () => {
   const ok: Runner = async () => res();
@@ -127,13 +146,54 @@ describe("runLoop", () => {
     expect(got).toEqual(["Task A"]);
   });
 
-  test("a non-zero exit returns the task to pending and stops the loop", async () => {
+  test("hands-on: a failed task is parked for the engineer and the others still run", async () => {
     const { store, tasks } = memStore([task("A"), task("B"), task("C")]);
     const run: Runner = async (t) => res(t.id === "B" ? 1 : 0);
-    const s = fakeSleep();
-    expect(await runLoop(store, run, undefined, s)).toEqual({ ran: ["A", "B"], stoppedOn: "B" });
-    expect(s.calls).toEqual([]);
-    expect(tasks.map((t) => t.status)).toEqual(["pr", "pending", "pending"]);
+    const out = await runLoop(store, run, undefined, fakeSleep());
+    expect(out.stoppedOn).toBeNull();
+    expect(out.ran.toSorted()).toEqual(["A", "B", "C"]);
+    expect(tasks.map((t) => t.status)).toEqual(["pr", "pending", "pr"]);
+    expect(tasks[1]).toMatchObject({ attempts: 1, needsYou: "cook failed (exit 1, no result report)" });
+  });
+
+  test("a parked task is not started again until its needs-you note is cleared", async () => {
+    const { store, tasks } = memStore([task("A")]);
+    let runs = 0;
+    const run: Runner = async () => {
+      runs++;
+      return res(runs === 1 ? 1 : 0);
+    };
+    const s = fakeSleep(3, (n) => {
+      if (n === 2) Object.assign(tasks[0]!, { needsYou: undefined, attempts: undefined });
+    });
+    await runLoop(store, run, undefined, s);
+    expect(runs).toBe(2);
+    expect(tasks[0]?.status).toBe("pr");
+  });
+
+  test("hands-off: a failing task is retried up to the cap, then parked", async () => {
+    const { store, tasks } = memStore([task("A")]);
+    let runs = 0;
+    const logs: string[] = [];
+    const run: Runner = async () => {
+      runs++;
+      return res(1);
+    };
+    await runLoop(store, run, (m) => logs.push(m), { ...fakeSleep(), ...HANDS_OFF });
+    expect(runs).toBe(MAX_TASK_ATTEMPTS);
+    expect(MAX_TASK_ATTEMPTS).toBe(3);
+    expect(tasks[0]).toMatchObject({ status: "pending", attempts: 3, needsYou: "cook failed (exit 1, no result report)" });
+    expect(logs.filter((m) => m.includes("trying again"))).toHaveLength(2);
+  });
+
+  test("hands-off: a retry that succeeds clears the attempt count", async () => {
+    const { store, tasks } = memStore([task("A")]);
+    let runs = 0;
+    const run: Runner = async () => res(++runs < 3 ? 1 : 0);
+    await runLoop(store, run, undefined, { ...fakeSleep(), ...HANDS_OFF });
+    expect(tasks[0]?.status).toBe("pr");
+    expect(tasks[0]?.attempts).toBeUndefined();
+    expect(tasks[0]?.needsYou).toBeUndefined();
   });
 
   test("a throwing runner is treated as a failure", async () => {
@@ -142,8 +202,9 @@ describe("runLoop", () => {
     const run: Runner = async () => {
       throw new Error("spawn failed");
     };
-    expect(await runLoop(store, run, (m) => logs.push(m), fakeSleep())).toEqual({ ran: ["A"], stoppedOn: "A" });
+    expect(await runLoop(store, run, (m) => logs.push(m), fakeSleep())).toEqual({ ran: ["A"], stoppedOn: null });
     expect(tasks[0]?.status).toBe("pending");
+    expect(tasks[0]?.needsYou).toContain("failed");
     expect(logs.some((m) => m.includes("spawn failed"))).toBe(true);
   });
 
@@ -154,30 +215,37 @@ describe("runLoop", () => {
   });
 
   test("sleeps LOOP_IDLE_MS when no task is ready and returns only once the signal aborts", async () => {
-    const { store, history } = memStore([task("A", "in_progress"), task("B", "pr")]);
-    const logs: string[] = [];
+    const { store, history } = memStore([task("A", "completed"), task("B", "pr")]);
     const s = fakeSleep(3);
-    expect(await runLoop(store, ok, (m) => logs.push(m), s)).toEqual({ ran: [], stoppedOn: null });
+    expect(await runLoop(store, ok, undefined, s)).toEqual({ ran: [], stoppedOn: null });
     expect(s.calls).toEqual([LOOP_IDLE_MS, LOOP_IDLE_MS, LOOP_IDLE_MS]);
     expect(LOOP_IDLE_MS).toBe(60_000);
     expect(history).toEqual([]);
   });
 
-  test("logs the stuck in_progress warning once across several idle polls", async () => {
-    const { store } = memStore([task("A", "in_progress")]);
+  test("a task left in progress by a dead loop goes back to pending, is cleaned up and runs again, with no attempt counted", async () => {
+    const { store, tasks, history } = memStore([task("A", "in_progress")]);
     const logs: string[] = [];
-    await runLoop(store, ok, (m) => logs.push(m), fakeSleep(4));
-    expect(logs.filter((m) => m.includes("still in_progress") && m.includes("A"))).toHaveLength(1);
+    const recovered: string[][] = [];
+    const out = await runLoop(store, ok, (m) => logs.push(m), { ...fakeSleep(), recover: (orphans) => void recovered.push(orphans.map((t) => t.id)) });
+    expect(recovered).toEqual([["A"]]);
+    expect(logs.some((m) => m.includes("A was in progress with no agent"))).toBe(true);
+    expect(history).toEqual(["A:pending", "A:in_progress", "A:pr"]);
+    expect(out.ran).toEqual(["A"]);
+    expect(tasks[0]?.attempts).toBeUndefined();
   });
 
-  test("logs the stuck warning again when the stuck set changes", async () => {
+  test("a failing clean-up is logged and the orphan still runs again", async () => {
     const { store, tasks } = memStore([task("A", "in_progress")]);
     const logs: string[] = [];
-    const s = fakeSleep(3, (n) => {
-      if (n === 2) tasks.push(task("B", "in_progress"));
+    await runLoop(store, ok, (m) => logs.push(m), {
+      ...fakeSleep(),
+      recover: () => {
+        throw new Error("git gone");
+      },
     });
-    await runLoop(store, ok, (m) => logs.push(m), s);
-    expect(logs.filter((m) => m.includes("still in_progress"))).toHaveLength(2);
+    expect(logs.some((m) => m.includes("git gone"))).toBe(true);
+    expect(tasks[0]?.status).toBe("pr");
   });
 
   test("picks up a task appended during the idle sleep on the next poll", async () => {
@@ -399,18 +467,17 @@ describe("runLoop audit log", () => {
       if (t.id === "A") store.remove("A");
       return res(1);
     };
-    const out = await runLoop(store, run, (m) => logs.push(m), { sleep, signal, audit });
+    const out = await runLoop(store, run, (m) => logs.push(m), { sleep, signal, audit, ...ONE_AT_A_TIME });
     expect(logs.some((m) => m.includes("A was deleted while running"))).toBe(true);
     expect(entries.map((e) => e.target)).toEqual(["B"]);
     expect(history).toEqual(["A:in_progress", "B:in_progress", "B:pending"]);
-    expect(out.stoppedOn).toBe("B");
+    expect(out.stoppedOn).toBeNull();
   });
 
-  test("a failing task records dev-task/failure before the loop stops", async () => {
+  test("a failing task records one dev-task/failure entry", async () => {
     const { store } = memStore([task("A")]);
     const { audit, entries } = fakeAudit();
-    const result = await runLoop(store, async () => res(3), undefined, { ...fakeSleep(), audit });
-    expect(result.stoppedOn).toBe("A");
+    await runLoop(store, async () => res(3), undefined, { ...fakeSleep(), audit });
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ action: "dev-task", target: "A", outcome: "failure", exitCode: 3 });
   });
@@ -439,7 +506,7 @@ describe("runLoop audit log", () => {
     const result = await runLoop(store, boom, (m) => logs.push(m), { ...fakeSleep(), audit });
     expect(entries).toEqual([]);
     expect(logs.some((m) => m.includes("runner threw") && m.includes("spawn ENOENT"))).toBe(true);
-    expect(result.stoppedOn).toBe("A");
+    expect(result.stoppedOn).toBeNull();
     expect(history).toEqual(["A:in_progress", "A:pending"]);
   });
 
@@ -516,7 +583,7 @@ describe("runLoop audit log", () => {
     const { store, history } = memStore([task("A"), task("B")]);
     const { audit } = fakeAudit(new Error("disk full"));
     const logs: string[] = [];
-    const result = await runLoop(store, ok, (m) => logs.push(m), { ...fakeSleep(), audit });
+    const result = await runLoop(store, ok, (m) => logs.push(m), { ...fakeSleep(), audit, ...ONE_AT_A_TIME });
     expect(result.ran).toEqual(["A", "B"]);
     expect(history).toEqual(["A:in_progress", "A:pr", "B:in_progress", "B:pr"]);
     expect(logs.some((m) => m.includes("disk full"))).toBe(true);
@@ -591,35 +658,36 @@ describe("runLoop agent result report", () => {
     expect(entries[0]).toMatchObject({ action: "dev-task", target: "A", outcome: "success", exitCode: 0 });
   });
 
-  test("a skipped task returns to pending, stops the loop, and records a skip entry with the reason", async () => {
-    const { store, tasks, history } = memStore([task("A"), task("B")]);
+  test("a skipped task is parked at once, even hands-off, and records a skip entry with the reason", async () => {
+    const { store, tasks, history } = memStore([task("A")]);
     const { audit, entries } = fakeAudit();
     const logs: string[] = [];
-    const s = fakeSleep();
-    const out = await runLoop(store, async () => res(0, { outcome: "skipped", reason: "task already done" }), (m) => logs.push(m), { ...s, audit });
-    expect(out).toEqual({ ran: ["A"], stoppedOn: "A" });
-    expect(tasks.map((t) => t.status)).toEqual(["pending", "pending"]);
+    const out = await runLoop(store, async () => res(0, { outcome: "skipped", reason: "task already done" }), (m) => logs.push(m), {
+      ...fakeSleep(),
+      audit,
+      ...HANDS_OFF,
+    });
+    expect(out).toEqual({ ran: ["A"], stoppedOn: null });
     expect(history).toEqual(["A:in_progress", "A:pending"]);
+    expect(tasks[0]?.needsYou).toBe("cook skipped: task already done");
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ action: "dev-task", target: "A", outcome: "skip", reason: "task already done", exitCode: 0 });
     expect(logs.some((m) => m.includes("skipped") && m.includes("task already done"))).toBe(true);
   });
 
-  test("exit 0 with no report is a failure: the task returns to pending and the loop stops", async () => {
-    const { store, tasks } = memStore([task("A"), task("B")]);
+  test("exit 0 with no report is a failure: the task returns to pending and is parked", async () => {
+    const { store, tasks } = memStore([task("A")]);
     const { audit, entries } = fakeAudit();
-    const out = await runLoop(store, async () => res(0, null), undefined, { ...fakeSleep(), audit });
-    expect(out.stoppedOn).toBe("A");
-    expect(tasks.map((t) => t.status)).toEqual(["pending", "pending"]);
+    await runLoop(store, async () => res(0, null), undefined, { ...fakeSleep(), audit });
+    expect(tasks[0]).toMatchObject({ status: "pending", needsYou: "cook failed (exit 0, no result report)" });
     expect(entries[0]).toMatchObject({ outcome: "failure", exitCode: 0, reason: "agent returned no result report" });
   });
 
-  test("a non-zero exit with a report is still a failure that stops the loop", async () => {
+  test("a non-zero exit with a report is still a failure", async () => {
     const { store, tasks } = memStore([task("A")]);
     const { audit, entries } = fakeAudit();
-    const out = await runLoop(store, async () => res(1, PROCESSED), undefined, { ...fakeSleep(), audit });
-    expect(out.stoppedOn).toBe("A");
-    expect(tasks[0]?.status).toBe("pending");
+    await runLoop(store, async () => res(1, PROCESSED), undefined, { ...fakeSleep(), audit });
+    expect(tasks[0]).toMatchObject({ status: "pending", needsYou: "cook failed (exit 1)" });
     expect(entries[0]).toMatchObject({ outcome: "failure", exitCode: 1 });
   });
 
@@ -667,6 +735,207 @@ describe("runLoop agent result report", () => {
     expect(attempts.get(7)?.reviews).toBe(1);
     expect(attempts.get(7)?.reviewedSha).toBeUndefined();
     expect(entries[0]).toMatchObject({ action: "review", outcome: "failure", exitCode: 0, reason: "agent returned no result report" });
+  });
+});
+
+describe("runLoop scheduler", () => {
+  /** A runner whose runs stay open until released, recording how many are open at once. */
+  function gated() {
+    const open = new Map<string, () => void>();
+    let peak = 0;
+    const started: string[] = [];
+    const run: Runner = (t) =>
+      new Promise((resolve) => {
+        started.push(t.id);
+        open.set(t.id, () => {
+          open.delete(t.id);
+          resolve(res());
+        });
+        peak = Math.max(peak, open.size);
+      });
+    return { run, open, started, peak: () => peak };
+  }
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const basePr = (number: number): PullRequest => ({
+    number,
+    url: `https://github.com/acme/widgets/pull/${number}`,
+    repo: "acme/widgets",
+    title: `PR ${number}`,
+    branch: `feat/x-${number}`,
+    createdAt: "2026-10-29T10:00:00.000Z",
+    isDraft: false,
+    headSha: "sha",
+    ci: "pass",
+    mergeable: "clean",
+    reviewDecision: "none",
+    labels: [],
+    comments: [],
+  });
+  /** Attempts that remember the last reviewed SHA, so a finished review is not asked for again. */
+  const reviewingAttempts = (): AttemptsStore => {
+    const shas: Record<number, string> = {};
+    return {
+      ...NOOP_ATTEMPTS,
+      get: (n) => (shas[n] === undefined ? undefined : { reviews: 1, patches: 0, reviewedSha: shas[n] }),
+      record: (n, _kind, sha) => {
+        shas[n] = sha;
+      },
+    };
+  };
+  function fakeAudit() {
+    const entries: AuditEntry[] = [];
+    const audit: AuditStore = { record: (e) => void entries.push(e), list: () => entries, purge: () => 0 };
+    return { audit, entries };
+  }
+
+  test("independent tasks run at the same time, up to the agent cap, and the rest follow as slots free up", async () => {
+    const { store, tasks } = memStore(["A", "B", "C", "D", "E"].map((id) => task(id)));
+    const g = gated();
+    const loop = runLoop(store, g.run, undefined, fakeSleep(1, () => {}));
+    await settle();
+    expect(g.started).toEqual(["A", "B", "C"]);
+    expect(tasks.map((t) => t.status)).toEqual(["in_progress", "in_progress", "in_progress", "pending", "pending"]);
+    g.open.get("B")?.();
+    await settle();
+    expect(g.started).toEqual(["A", "B", "C", "D"]);
+    for (let i = 0; i < 5 && g.open.size > 0; i++) {
+      for (const release of [...g.open.values()]) release();
+      await settle();
+    }
+    await loop;
+    expect(g.peak()).toBe(3);
+    expect(tasks.every((t) => t.status === "pr")).toBe(true);
+  });
+
+  test("the cap comes from the settings and is re-read on every poll", async () => {
+    const { store } = memStore(["A", "B", "C"].map((id) => task(id)));
+    const g = gated();
+    let cap = 1;
+    const loop = runLoop(store, g.run, undefined, { ...fakeSleep(), settings: () => ({ ...DEFAULT_SETTINGS, agentCap: cap }) });
+    await settle();
+    expect(g.started).toEqual(["A"]);
+    cap = 2;
+    g.open.get("A")?.();
+    await settle();
+    expect(g.started).toEqual(["A", "B", "C"]);
+    for (const release of [...g.open.values()]) release();
+    await loop;
+    expect(g.peak()).toBe(2);
+  });
+
+  test("a dependent never runs alongside its dependency", async () => {
+    const { store } = memStore([task("A"), task("B", "pending", ["A"]), task("C")]);
+    const g = gated();
+    const loop = runLoop(store, g.run, undefined, fakeSleep());
+    await settle();
+    expect(g.started).toEqual(["A", "C"]);
+    for (const release of [...g.open.values()]) release();
+    await loop;
+    expect(g.started).toEqual(["A", "C"]);
+  });
+
+  test("a PR already being worked on is not started a second time by the next poll", async () => {
+    const { store } = memStore([]);
+    const source: PrSource = { list: async () => [{ ...basePr(7) }] };
+    let runs = 0;
+    let release = () => {};
+    const runPr: PrRunner = () =>
+      new Promise((resolve) => {
+        runs++;
+        release = () => resolve(res());
+      });
+    const s = fakeSleep(3, (n) => {
+      if (n === 2) release();
+    });
+    await runLoop(store, async () => res(), undefined, { ...s, prs: source, attempts: reviewingAttempts(), runPr });
+    expect(runs).toBe(1);
+  });
+
+  test("the loop keeps polling while agents run: a task added meanwhile starts without waiting for them", async () => {
+    const { store, tasks } = memStore([task("A")]);
+    const g = gated();
+    const s = fakeSleep(3, (n) => {
+      if (n === 1) tasks.push(task("B"));
+      if (n === 2) for (const release of [...g.open.values()]) release();
+    });
+    await runLoop(store, g.run, undefined, s);
+    expect(g.started).toEqual(["A", "B"]);
+    expect(g.peak()).toBe(2);
+  });
+
+  test("on abort it starts nothing new and waits for the running agents", async () => {
+    const { store, tasks } = memStore([task("A"), task("B"), task("C"), task("D")]);
+    const g = gated();
+    const controller = new AbortController();
+    const logs: string[] = [];
+    const loop = runLoop(store, g.run, (m) => logs.push(m), { sleep: () => new Promise(() => {}), signal: controller.signal });
+    await settle();
+    controller.abort();
+    await settle();
+    let done = false;
+    void loop.then(() => {
+      done = true;
+    });
+    await settle();
+    expect(done).toBe(false);
+    for (const release of [...g.open.values()]) release();
+    await loop;
+    expect(g.started).toEqual(["A", "B", "C"]);
+    expect(tasks[3]?.status).toBe("pending");
+    expect(logs.some((m) => m.includes("waiting for 3 running agent"))).toBe(true);
+  });
+
+  test("a usage limit counts no attempt, returns the task to pending and holds every start until it resets", async () => {
+    const { store, tasks } = memStore([task("A"), task("B")]);
+    const { audit, entries } = fakeAudit();
+    let clock = 1_000_000;
+    const resetAt = clock + 5 * 60_000;
+    const started: string[] = [];
+    const states: LoopState[] = [];
+    const run: Runner = async (t) => {
+      started.push(t.id);
+      return started.length === 1 ? { exitCode: 1, report: null, usageLimit: { resetAt } } : res();
+    };
+    const s = fakeSleep(3, (n) => {
+      if (n === 1) expect(started).toEqual(["A"]);
+      if (n === 2) clock = resetAt + 1;
+    });
+    const logs: string[] = [];
+    await runLoop(store, run, (m) => logs.push(m), { ...s, audit, now: () => clock, onState: (st) => states.push(st), ...ONE_AT_A_TIME });
+    expect(started).toEqual(["A", "A", "B"]);
+    expect(tasks.map((t) => [t.status, t.attempts, t.needsYou])).toEqual([
+      ["pr", undefined, undefined],
+      ["pr", undefined, undefined],
+    ]);
+    expect(entries.map((e) => e.outcome)).toEqual(["success", "success"]);
+    expect(logs.some((m) => m.includes("usage limit reached"))).toBe(true);
+    expect(states.some((st) => st.pausedUntil === new Date(resetAt).toISOString())).toBe(true);
+    expect(states.at(-1)).toEqual({ running: [] });
+  });
+
+  test("a usage limit with no reset time holds starts for the fallback period", async () => {
+    const { store } = memStore([task("A")]);
+    let clock = 0;
+    let runs = 0;
+    const run: Runner = async () => (++runs === 1 ? { exitCode: 1, report: null, usageLimit: { resetAt: null } } : res());
+    const s = fakeSleep(4, (n) => {
+      if (n === 2) clock = USAGE_LIMIT_FALLBACK_MS - 1;
+      if (n === 3) clock = USAGE_LIMIT_FALLBACK_MS + 1;
+    });
+    await runLoop(store, run, undefined, { ...s, now: () => clock });
+    expect(runs).toBe(2);
+  });
+
+  test("the published state lists what is running", async () => {
+    const { store } = memStore([task("A")]);
+    const g = gated();
+    const states: LoopState[] = [];
+    const loop = runLoop(store, g.run, undefined, { ...fakeSleep(), now: () => 0, onState: (st) => states.push(st) });
+    await settle();
+    expect(states.at(-1)).toEqual({ running: [{ kind: "dev-task", target: "A", startedAt: "1970-01-01T00:00:00.000Z" }] });
+    g.open.get("A")?.();
+    await loop;
+    expect(states.at(-1)).toEqual({ running: [] });
   });
 });
 
@@ -753,10 +1022,11 @@ describe("main", () => {
     expect(tasks[0]!.status).toBe("pr");
   });
 
-  test("returns 1 and returns the task to pending when the agent fails", async () => {
+  test("returns 0 and parks the task when the agent fails: a failure no longer stops the loop", async () => {
     const { store, tasks } = memStore([task("A")]);
-    expect(await main(store, ["sh", "-c", "exit 1"], { ...fakeSleep(), ...tempLock() })).toBe(1);
+    expect(await main(store, ["sh", "-c", "exit 1"], { ...fakeSleep(), ...tempLock() })).toBe(0);
     expect(tasks[0]!.status).toBe("pending");
+    expect(tasks[0]!.needsYou).toContain("failed");
   });
 
   test("returns 0 when aborted while idle", async () => {
@@ -771,6 +1041,68 @@ describe("main", () => {
     await Bun.sleep(10);
     process.emit("SIGINT");
     expect(await done).toBe(0);
+  });
+});
+
+describe("agents in worktrees", () => {
+  /** Workspaces that hand out real temp folders and record what was created and removed. */
+  function fakeWorkspaces() {
+    const events: string[] = [];
+    const base = mkdtempSync(join(tmpdir(), "ws-"));
+    const workspaces: Workspaces = {
+      async create(name) {
+        events.push(`create ${name}`);
+        const path = join(base, name);
+        mkdirSync(path, { recursive: true });
+        return path;
+      },
+      async remove(name) {
+        events.push(`remove ${name}`);
+      },
+      async prune() {
+        events.push("prune");
+      },
+    };
+    return { workspaces, events, base };
+  }
+
+  test("a cook agent runs inside its own worktree, which is removed afterwards", async () => {
+    const { workspaces, events, base } = fakeWorkspaces();
+    const printed: string[] = [];
+    const runner = agentRunner(["sh", "-c", `printf '{"result":"%s"}' "$(pwd -P)"`], (t) => printed.push(t), workspaces);
+    await runner(task("add-login"));
+    expect(printed[0]).toBe(realpathSync(join(base, "cook-add-login")));
+    expect(events).toEqual(["create cook-add-login", "remove cook-add-login"]);
+  });
+
+  test("a PR agent gets a worktree named after the PR, removed even when the agent fails", async () => {
+    const { workspaces, events } = fakeWorkspaces();
+    const runner = prRunner(["sh", "-c", "exit 3"], ["sh", "-c", "exit 4"], () => {}, workspaces);
+    expect((await runner({ number: 7 } as PullRequest, "patch")).exitCode).toBe(4);
+    expect(events).toEqual(["create pr-7", "remove pr-7"]);
+  });
+
+  test("the runner reports a usage limit found in the agent's output", async () => {
+    const out = JSON.stringify({ is_error: true, result: "Claude AI usage limit reached|1749924000" });
+    const runner = agentRunner(["sh", "-c", `printf '%s' "$0"; exit 1`, out], () => {});
+    expect(await runner(task("A"))).toEqual({ exitCode: 1, report: null, usageLimit: { resetAt: 1749924000_000 } });
+  });
+
+  test("main prunes leftover worktrees before it starts", async () => {
+    const { workspaces, events } = fakeWorkspaces();
+    const { store } = memStore([]);
+    await main(store, ["sh", "-c", "exit 0"], { ...fakeSleep(), ...tempLock(), workspaces });
+    expect(events).toEqual(["prune"]);
+  });
+
+  test("the loop state round-trips through its file; a missing or broken file reads as idle", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "state-")), "loop-state.json");
+    expect(readLoopState(path)).toEqual({ running: [] });
+    const state: LoopState = { running: [{ kind: "review", target: 7, startedAt: "2026-11-19T12:00:00.000Z" }], pausedUntil: "2026-11-19T13:00:00.000Z" };
+    writeLoopState(state, path);
+    expect(readLoopState(path)).toEqual(state);
+    writeFileSync(path, "{nope");
+    expect(readLoopState(path)).toEqual({ running: [] });
   });
 });
 
