@@ -31,3 +31,32 @@ describe.each(SKILLS)("%s skill", (name) => {
     expect(resultSection(text) ?? "").not.toMatch(/json/i);
   });
 });
+
+/** The dependency skills, and who must hand off to whom. */
+const DEP_SKILLS = ["task-pair-check", "task-determine-deps", "task-update-deps"] as const;
+
+describe("dependency skills", () => {
+  test.each(DEP_SKILLS)("%s exists with a matching name and a description", (name) => {
+    const text = readSkill(name);
+    expect(text).toMatch(new RegExp(`^---\\nname: ${name}\\ndescription: .+\\n`));
+  });
+
+  test("the judging skill never writes; the other two reach the task file only through the deps command", () => {
+    expect(readSkill("task-pair-check")).toMatch(/Never edit any file/);
+    for (const name of ["task-determine-deps", "task-update-deps"] as const) {
+      const text = readSkill(name);
+      expect(text).toContain("../task-pair-check/SKILL.md");
+      expect(text).toContain("bun factory/deps-cli.ts candidates");
+      expect(text).toMatch(/Never decide whether (a|the) task may run/);
+    }
+    expect(readSkill("task-update-deps")).toContain("bun factory/deps-cli.ts set");
+  });
+
+  test("take_order, to_tasks and customize_order hand dependencies to them", () => {
+    expect(readSkill("to_tasks")).toContain("../task-determine-deps/SKILL.md");
+    expect(readSkill("customize_order")).toContain("../task-update-deps/SKILL.md");
+    const takeOrder = readSkill("take_order");
+    expect(takeOrder.indexOf("**Pick the project.**")).toBeLessThan(takeOrder.indexOf("**Break down.**"));
+    expect(takeOrder).toContain("dependencyReasons");
+  });
+});

@@ -51,8 +51,12 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
    6. Get the engineer's explicit approval of the final change. If they do not approve, keep grilling until a new
       change, or no change, is agreed.
    7. Write the agreed change to `<main>/factory/tasks.json`. Change only that task's `title`, `description` and
-      `acceptanceCriteria`. Never change its `id`, `status`, `dependencies` or any other task. Keep the file valid
-      JSON.
+      `acceptanceCriteria`. Never change its `id`, `status` or any other task. Keep the file valid JSON.
+   8. Update the task's dependencies: from `<main>`, read `../task-update-deps/SKILL.md` and follow it for this
+      task. It changes only this task's dependencies. If it returns a `waiting` list that is not empty, the changed
+      task must wait for those tasks: skip steps 4 and 5, and in step 6 push nothing and say in the summary that the
+      PR will be updated once they are done. The loop leaves the PR alone until then, then reviews it against the
+      changed task and patches it.
 
    If the engineer decides on no change, skip to step 6 and say so in the summary.
 4. **Update the PR to the new task.** Read `../cook_poteto/SKILL.md` and follow it in the worktree with this brief.
@@ -110,7 +114,7 @@ from this skill's folder. Load each by reading that file with the Read tool; do 
 - Never check out a branch in the main checkout. Work only in the worktree.
 - Never edit or stage code yourself; the coding is cook_poteto's.
 - In `factory/tasks.json`, change only this PR's task, only the fields step 3 names, and only after the engineer
-  approves.
+  approves. Its dependencies change only through task-update-deps.
 - Post exactly one comment per run, the summary. Post it even when nothing changed, so the request counts as
   answered.
 - Prefer one command per Bash call; avoid chaining with `&&`, `;` or pipes unless every part is a read-only helper.
