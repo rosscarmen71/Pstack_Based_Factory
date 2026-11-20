@@ -144,6 +144,14 @@ A completed or deleted dependency is always met. The mode is set in `factory/set
 
 The file is read on every poll, so a change applies from the next start and never stops work already running. When several things are ready the loop finishes before it starts: PRs that need a patch first, then PRs that need a review, then new tasks, oldest first within each.
 
+**Deciding dependencies.** Whether two tasks clash is a judgement, made by a skill; everything around it is code in `factory/deps.ts`, reached through a small command line:
+
+- `bun factory/deps-cli.ts candidates [--for <task-id>] [--project <name>]` lists every unfinished task to compare against (never completed or deleted ones), and the mode that decides what to do when in doubt.
+- `bun factory/deps-cli.ts set <task-id> '{"<dependency-id>": "<reason>"}'` writes one task's dependencies and their reasons. It refuses unknown or completed tasks and anything that would make two tasks wait for each other.
+- `bun factory/deps-cli.ts blockers <task-id>` says what the task is still waiting for.
+
+A PR whose task gained a dependency after it was built (through `/customize_order`) is left alone by the loop until that dependency is met.
+
 Deleting a task removes it for good: the visualizer's server stops its agent, closes its open PR, deletes its branch, erases its audit entries, attempt counts and run transcripts, and removes it from the dependency list of every task that depended on it (`DELETE /api/tasks/<id>`, or `DELETE /api/sessions/<id>` for every task of a session).
 
 A task is ready when it is `pending` and every dependency is met (see "When a task may start" above). `cook` branches from the branches of its dependencies that are not merged yet, when it has any.

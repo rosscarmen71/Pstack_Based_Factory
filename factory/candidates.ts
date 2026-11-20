@@ -2,7 +2,7 @@
 // the start gate (gate.ts) lets through.
 // Pure: no I/O beyond reading the attempts store, nothing is run or written here.
 
-import { canStart, dependencyMoved, type GateContext, taskOfPr } from "./gate.ts";
+import { blockers, canStart, dependencyMoved, type GateContext, taskOfPr } from "./gate.ts";
 import type { AttemptsStore } from "./pr-attempts.ts";
 import { decidePr } from "./pr-state.ts";
 import type { PullRequest } from "./prs.ts";
@@ -55,6 +55,9 @@ function rank(tasks: Task[], prs: PullRequest[], attempts: AttemptsStore, settin
       dependencyMoved: owner !== undefined && dependencyMoved(owner, ctx),
     });
     if (action === "none") continue;
+    // A task changed by customize_order may have gained a dependency after its PR was built. Until that one is
+    // met the PR is left alone. Dependencies the task is stacked on (builtOn) never hold it: it already has their code.
+    if (owner !== undefined && blockers(owner, ctx).some((b) => !(owner.builtOn && b.id in owner.builtOn))) continue;
     if (attempts.exceeded(pr.number)) {
       if (!attempts.get(pr.number)?.flagged) newlyExceeded.push(pr);
       continue;

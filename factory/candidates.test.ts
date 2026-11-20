@@ -166,6 +166,24 @@ describe("rankCandidates", () => {
     expect(pickCandidate(tasks, prs, attempts).candidate).toEqual(rankCandidates(tasks, prs, attempts)[0] ?? null);
   });
 });
+describe("a PR whose task gained a dependency", () => {
+  const owned = (over: Partial<Task>) => task("t", { status: "pr", ...over });
+
+  test("is left alone until that dependency is met", () => {
+    const prs = [pr(1, { branch: "feat/t" })];
+    const waiting = [task("u"), owned({ dependencies: ["u"] })];
+    expect(rankCandidates(waiting, prs, fakeAttempts()).map(idOf)).toEqual(["task:u"]);
+    const met = [task("u", { status: "completed" }), owned({ dependencies: ["u"] })];
+    expect(rankCandidates(met, prs, fakeAttempts()).map(idOf)).toEqual(["pr:1"]);
+  });
+
+  test("a dependency it is stacked on never holds its PR", () => {
+    const tasks = [task("u", { status: "pr" }), owned({ dependencies: ["u"], builtOn: { u: "sha" } })];
+    const prs = [pr(1, { branch: "feat/t" }), pr(2, { branch: "feat/u" })];
+    expect(rankCandidates(tasks, prs, fakeAttempts()).map(idOf)).toEqual(["pr:1", "pr:2"]);
+  });
+});
+
 describe("comment requests", () => {
   let dir: string;
   beforeEach(() => {
