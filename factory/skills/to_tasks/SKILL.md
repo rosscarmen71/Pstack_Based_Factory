@@ -7,7 +7,7 @@ disable-model-invocation: true
 # Plan
 
 Run by a human, interactively; it is not part of the loop. The input is a brief description of what the engineer wants
-to build. The output is a reviewed set of tasks appended to `factory/tasks.json`. The 
+to build. The output is a reviewed set of tasks appended to the task queue (this repository's `tasks.json`, kept in the factory's home). The 
 
 ## Task schema
 
@@ -23,8 +23,8 @@ Each task is an object with:
 - `status`: always `"pending"` when you write it. The loop owns it from there (`pending` -> `in_progress` -> `pr` ->
   `completed`).
 - `createdAt`: optional ISO 8601 timestamp (e.g. `2026-10-29T18:46:00.000Z`). Stamp it with the current time at
-  append time (step 5). Existing tasks without it stay valid; do not backfill them.
-- `session`: id of the take_order call that created the task. Stamped at append time (step 5), the same for every
+  append time (step 4). Existing tasks without it stay valid; do not backfill them.
+- `session`: id of the take_order call that created the task. Stamped at append time (step 4), the same for every
   task of one order. Never changed afterwards.
 
 Each task must be small enough to deliver as one PR.
@@ -38,7 +38,7 @@ All tasks must have the following qualities if they do not naturally have these 
 - **Independent Context**: if there are two tasks where it be impractical to develop both unless you were developing them in parallel talking to each other and developing them together then those two tasks are not independent tasks and should not be separate. Note that this is different than tasks being dependent on each other. It is pulse to have multiple tasks that must be done in sequence because the next tasks depend on the specific code written by the previous tasks. They can still be separate the differences if they would have to be developed in parallel, then they are not separate tasks.
 
 ## Task Dependency
-A task that depends on another runs after it, never at the same time; tasks with no dependency between them run in parallel. Dependencies are decided by the **task-determine-deps** skill, not here: read `../task-determine-deps/SKILL.md` and follow it with the drafted tasks and the order's project. It compares each new task with every unfinished task, including ones from earlier orders, and returns each task's `dependencies` and `dependencyReasons`. Do not add or remove a dependency by any other means, except when the engineer asks for it.
+A task that depends on another runs after it, never at the same time; tasks with no dependency between them run in parallel. Dependencies are decided by the **task-determine-deps** skill, not here: read `../task-determine-deps/SKILL.md` and follow it with the drafted tasks. It compares each new task with every unfinished task, including ones from earlier orders, and returns each task's `dependencies` and `dependencyReasons`. Do not add or remove a dependency by any other means, except when the engineer asks for it.
 
 ## Steps
 

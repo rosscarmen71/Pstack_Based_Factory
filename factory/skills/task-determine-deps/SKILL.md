@@ -7,8 +7,8 @@ disable-model-invocation: true
 # Task Determine Deps
 
 Decides which tasks each new task must wait for. Run by `to_tasks` inside `take_order`, after the tasks are drafted
-and before the engineer reviews them. The input is the drafted tasks of one order (not yet in `factory/tasks.json`)
-and the order's project. The output is each drafted task's `dependencies` and `dependencyReasons`, plus a report for
+and before the engineer reviews them. The input is the drafted tasks of one order (not yet in the task queue: this repository's
+`tasks.json`, kept in the factory's home). The output is each drafted task's `dependencies` and `dependencyReasons`, plus a report for
 the engineer.
 
 Other skills named here sit beside this one, at `../<name>/SKILL.md` from this skill's folder. Load each by reading
@@ -16,7 +16,7 @@ that file with the Read tool.
 
 ## Steps
 
-1. **Get the tasks to compare against.** Run `bun factory/deps-cli.ts candidates --project <project>`. It prints:
+1. **Get the tasks to compare against.** Run `~/.pstack-factory/bin/factory deps candidates`. It prints:
    - `mode`: `hands-on` or `hands-off`, which decides what to do when in doubt (step 4);
    - `candidates`: every unfinished task. Completed and deleted tasks are never in it and are never dependencies.
 
@@ -38,7 +38,7 @@ that file with the Read tool.
      - the other task: its name, what it does, and which of its files and changes may conflict (`mayConflict`).
    - `unsure`, mode `hands-off`: treat it as `dependent`. Start the reason with `unsure: `.
 5. **Keep the direction.** A new task waits for an existing one. Never add a dependency to a task that is already
-   in `factory/tasks.json`. Among the drafted tasks, a later one in build order waits for an earlier one, never the
+   in the task queue. Among the drafted tasks, a later one in build order waits for an earlier one, never the
    reverse.
 
 ## Return
@@ -49,6 +49,6 @@ that file with the Read tool.
 
 ## Rules
 
-- Never write `factory/tasks.json`; `take_order` appends the tasks.
+- Never write the task queue; `take_order` appends the tasks.
 - Never decide whether a task may run. That is the loop's start gate.
 - A wrong dependency only costs time. When the choice is yours, choose dependent.

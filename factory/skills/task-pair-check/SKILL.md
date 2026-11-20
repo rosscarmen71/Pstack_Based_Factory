@@ -7,7 +7,7 @@ disable-model-invocation: true
 # Task Pair Check
 
 Judges whether a **target** task must wait for each of a list of **candidate** tasks. It is the one place where
-"do these two tasks clash" is decided. It only judges: it never writes `factory/tasks.json`, never decides what to do
+"do these two tasks clash" is decided. It only judges: it never writes the task queue (this repository's `tasks.json`, kept in the factory's home), never decides what to do
 about doubt, and never decides whether a task may run.
 
 The input is the target task (title, description, acceptance criteria) and the candidates to compare it with. The

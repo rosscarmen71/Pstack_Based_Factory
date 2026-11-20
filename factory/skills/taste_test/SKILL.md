@@ -12,12 +12,16 @@ Taste test owns the factory contract: every `gh` call, the verdict, the one revi
 done by **cook_poteto**. Other skills named here sit beside this one, at `../<name>/SKILL.md` from this skill's folder.
 Load each by reading that file with the Read tool; do not use the Skill tool for them.
 
+**The task queue** is this repository's `tasks.json`. It is kept in the factory's home, not in the repository. Get its
+path by running `~/.pstack-factory/bin/factory tasks-file` in the repository (or in a worktree of it), and use that
+path wherever this skill says "the task queue".
+
 ## Steps
 
 1. **Load the PR.** Read it with `gh pr view <pr>` and `gh pr diff <pr>`. Stop and report if it does not exist or is
    not open. Check it out with `gh pr checkout <pr>` so the review runs against the real code. Run `git fetch origin`
    and note the base branch, the head SHA and the merge base (`git merge-base origin/<base> <head-sha>`).
-2. **Find the task.** If the head branch is `<type>/<task-id>` and that id exists in `factory/tasks.json`, load the
+2. **Find the task.** If the head branch is `<type>/<task-id>` and that id exists in the task queue, load the
    task. Otherwise the review has no criteria to check.
 3. **Review through cook_poteto.** Read `../cook_poteto/SKILL.md` and follow it with this brief. Its rules apply only
    while it runs; when it returns, continue here under this skill's rules. The brief:
@@ -62,7 +66,7 @@ Load each by reading that file with the Read tool; do not use the Skill tool for
 
 - Never edit code, never push, never merge.
 - Post exactly one review per run; do not add separate comments. The label in step 6 is not a comment.
-- Do not edit `factory/tasks.json`; `status` is moved by the loop.
+- Do not edit the task queue; `status` is moved by the loop.
 - Exit non-zero if no review was posted; the loop reads exit 0 as "reviewed".
 - The session starts in the repo root, so `cd` is not needed.
 - Prefer one command per Bash call; avoid chaining with `&&`, `;` or pipes unless every part is a read-only helper.
