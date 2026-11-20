@@ -21,6 +21,8 @@ Each task is an object with:
 - `status`: always `"pending"` when you write it. The loop owns it from there (`pending` -> `in_progress` -> `pr`).
 - `createdAt`: optional ISO 8601 timestamp (e.g. `2026-10-29T18:46:00.000Z`). Stamp it with the current time at
   append time (step 5). Existing tasks without it stay valid; do not backfill them.
+- `session`: id of the take_order call that created the task. Stamped at append time (step 5), the same for every
+  task of one order. Never changed afterwards.
 
 Each task must be small enough to deliver as one PR.
 
