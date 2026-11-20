@@ -26,7 +26,7 @@ A small software factory that relies heavily on [pstack skills](https://github.c
 
 ## What Is The Pstack_Based_Factory?
 
-A loop that turns tasks into pull requests. You add tasks with `/take_order`; the loop picks the oldest ready one,
+A loop that turns tasks into pull requests. You add tasks with `/take_order`; the loop picks a ready one,
 runs `/cook` to branch, implement and verify it, and opens a PR. It also reviews and fixes other open PRs with
 `/taste_test` and `/remake`. The work is done by pstack-style skills in `factory/skills/`, run through the Claude Code
 CLI. Merging is always yours; the loop never merges. Watch it with the read-only queue view (`bun run queue`) or the
@@ -111,7 +111,7 @@ from `[]`.
    the feature with you (`grill-with-docs`), splits it into tasks (`to_tasks`), and appends them to
    `factory/tasks.json` once you approve.
 2. **The loop picks the next thing to do.** `bun run loop` starts `factory/loop.ts`. Each turn it reads the tasks,
-   lists open PRs with `gh`, and picks the single oldest candidate.
+   lists open PRs with `gh`, and picks one thing to do: a PR that needs a patch, else a PR that needs a review, else a task that may start.
 3. **A task becomes a PR.** The loop runs `claude -p "/cook <task-id>"`. `cook` creates the branch, has
    `cook_poteto` implement the task, runs the checks, gets an independent verification, and opens the PR.
 4. **Other PRs get reviewed or fixed.** For an open PR that isn't one of the factory's own task PRs, the loop runs
@@ -131,15 +131,28 @@ Merging is always up to you. The loop never merges.
 
 Each task in `factory/tasks.json` has an `id`, `title`, `description`, `acceptanceCriteria`, `dependencies` (other task ids) and a `status`. `take_order` also stamps `createdAt` and a `project`: the name of the order the task belongs to, which groups orders in the visualizer (see below). `take_order` asks you for it when you add the order, and you can change it later from the visualizer. The loop owns `status` and moves it `pending` → `in_progress` → `pr` → `completed`. `pr` means the task's PR is open. `completed` means that PR was merged into main (or you marked the task completed by hand) and is final: nothing touches the task again. If the PR is closed without merging, the task stays at `pr` and gets a `needsYou` note. The loop also records `runs`, `skips`, `lastSkipReason` and the task's `pr` (repo, number, url, open). A task may also carry `session` (the id of the `take_order` call that created it; tasks without one are grouped by creation time), `dependencyReasons` (why each dependency exists) and `mode` (`hands-on` or `hands-off`).
 
+**When a task may start.** A task with no dependencies may start as soon as it exists. A task with dependencies waits until each one is met, and each dependency is judged by its own mode:
+
+- **hands-on** (the default): the dependency's PR must be merged into main.
+- **hands-off**: it is enough that the dependency's open PR has passed `taste_test` cleanly: the review covers its current commit, CI is passing, it has no merge conflict, and no `/remake` or `/customize_order` comment is waiting. The dependent task is then built on top of the dependency's unmerged branch. If the dependency later gets new commits, the loop runs `/remake` on the dependent PR to bring them in, and reviews it again.
+
+A completed or deleted dependency is always met. The mode is set in `factory/settings.json` (gitignored; a missing file means the defaults), most specific level first: the task's own `mode`, then `sessions` (by session id), then `projects` (by project name), then `defaultMode`:
+
+```json
+{ "defaultMode": "hands-on", "projects": {}, "sessions": { "session-20261119T204500Z": "hands-off" }, "agentCap": 3 }
+```
+
+The file is read on every poll, so a change applies from the next start and never stops work already running. When several things are ready the loop finishes before it starts: PRs that need a patch first, then PRs that need a review, then new tasks, oldest first within each.
+
 Deleting a task removes it for good: the visualizer's server stops its agent, closes its open PR, deletes its branch, erases its audit entries, attempt counts and run transcripts, and removes it from the dependency list of every task that depended on it (`DELETE /api/tasks/<id>`, or `DELETE /api/sessions/<id>` for every task of a session).
 
-A task is ready when it is `pending` and every dependency has reached `pr`. The PR doesn't have to be merged. `cook` branches from its dependencies' branches when it has any.
+A task is ready when it is `pending` and every dependency is met (see "When a task may start" above). `cook` branches from the branches of its dependencies that are not merged yet, when it has any.
 
 Tests are not mandatory for the features the factory builds. `cook` proves each acceptance criterion with one of three proof types: a `test`, a `live` check or a `manual` check. The factory's own code is tested, and those tests run in CI.
 
 ### The Loop
 
-Each turn, the loop takes the single oldest candidate across ready tasks and PRs that need work, by `createdAt`. Tasks without `createdAt` go last.
+Each turn, the loop takes one candidate: a PR that needs a patch, else a PR that needs a review, else a ready task. Within each of those it takes the oldest by `createdAt`; tasks without `createdAt` go last.
 
 **Tasks.** The loop sets the task to `in_progress` and runs `/cook <id>`.
 

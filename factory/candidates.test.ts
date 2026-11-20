@@ -62,10 +62,15 @@ describe("pickCandidate", () => {
     expect(idOf(pickCandidate(tasks, prs, fakeAttempts()).candidate)).toBe("pr:1");
   });
 
-  test("an older task beats a newer PR", () => {
+  test("a PR that needs a review beats an older task", () => {
     const tasks = [task("a", { createdAt: "2026-10-29T11:00:00Z" })];
     const prs = [pr(1, { createdAt: "2026-10-29T12:00:00Z" })];
-    expect(idOf(pickCandidate(tasks, prs, fakeAttempts()).candidate)).toBe("task:a");
+    expect(idOf(pickCandidate(tasks, prs, fakeAttempts()).candidate)).toBe("pr:1");
+  });
+
+  test("a patch beats an older review", () => {
+    const prs = [pr(1, { createdAt: "2026-10-29T10:00:00Z" }), pr(2, { createdAt: "2026-10-29T12:00:00Z", ci: "fail" })];
+    expect(idOf(pickCandidate([], prs, fakeAttempts()).candidate)).toBe("pr:2");
   });
 
   test("an unstamped task loses to a stamped PR", () => {
@@ -117,10 +122,10 @@ describe("pickCandidate", () => {
     expect(pickCandidate([], [pr(1)], attempts).candidate).toBeNull();
   });
 
-  test("an exact timestamp tie picks the task", () => {
+  test("an exact timestamp tie still picks the PR", () => {
     const at = "2026-10-29T12:00:00Z";
     const r = pickCandidate([task("a", { createdAt: at })], [pr(1, { createdAt: at })], fakeAttempts());
-    expect(idOf(r.candidate)).toBe("task:a");
+    expect(idOf(r.candidate)).toBe("pr:1");
   });
 });
 
@@ -128,7 +133,7 @@ describe("rankCandidates", () => {
   const tasks = [
     task("unstamped"),
     task("owner", { createdAt: "2026-10-29T10:00:00Z" }),
-    task("blocked", { dependencies: ["missing"], createdAt: "2026-10-29T09:00:00Z" }),
+    task("blocked", { dependencies: ["late"], createdAt: "2026-10-29T09:00:00Z" }),
     task("late", { createdAt: "2026-10-29T14:00:00Z" }),
   ];
   const prs = [
@@ -138,22 +143,22 @@ describe("rankCandidates", () => {
   ];
   const exceeded: PrAttempts = { reviews: MAX_PR_ATTEMPTS, patches: 0, reviewedSha: "old" } as PrAttempts;
 
-  test("lists tasks and PRs oldest first with unstamped tasks last", () => {
+  test("lists PRs oldest first, then tasks oldest first with unstamped tasks last", () => {
     const ids = rankCandidates(tasks, prs.filter((p) => p.number !== 3), fakeAttempts()).map(idOf);
-    expect(ids).toEqual(["task:owner", "pr:1", "pr:2", "task:late", "task:unstamped"]);
+    expect(ids).toEqual(["pr:1", "pr:2", "task:owner", "task:late", "task:unstamped"]);
   });
 
   test("omits PRs at the attempt limit and blocked tasks", () => {
     const ids = rankCandidates(tasks, prs, fakeAttempts({ 3: exceeded })).map(idOf);
     expect(ids).not.toContain("pr:3");
     expect(ids).not.toContain("task:blocked");
-    expect(ids).toEqual(["task:owner", "pr:1", "pr:2", "task:late", "task:unstamped"]);
+    expect(ids).toEqual(["pr:1", "pr:2", "task:owner", "task:late", "task:unstamped"]);
   });
 
-  test("ties keep original order, tasks before PRs", () => {
+  test("ties keep original order within a group", () => {
     const t = [task("a", { createdAt: "2026-10-29T12:00:00Z" }), task("b", { createdAt: "2026-10-29T12:00:00Z" })];
-    const ids = rankCandidates(t, [pr(1)], fakeAttempts()).map(idOf);
-    expect(ids).toEqual(["task:a", "task:b", "pr:1"]);
+    const ids = rankCandidates(t, [pr(1), pr(2)], fakeAttempts()).map(idOf);
+    expect(ids).toEqual(["pr:1", "pr:2", "task:a", "task:b"]);
   });
 
   test("pickCandidate's candidate is the first ranked candidate", () => {

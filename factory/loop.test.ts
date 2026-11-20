@@ -9,7 +9,6 @@ import {
   LOOP_IDLE_MS,
   main,
   PATCH_CMD,
-  pickNext,
   prRunner,
   REVIEW_CMD,
   runLoop,
@@ -91,45 +90,19 @@ function fakeSleep(after = 1, onCall: (n: number) => void = () => {}) {
   return { sleep, calls, signal: controller.signal };
 }
 
-describe("pickNext", () => {
-  test("returns the first pending task with no dependencies", () => {
-    expect(pickNext([task("A"), task("B")])?.id).toBe("A");
-  });
-
-  test("a completed dependency counts as done", () => {
-    expect(pickNext([task("A", "pending", ["B"]), task("B", "completed")])?.id).toBe("A");
-  });
-
-  test("waits until every dependency is in pr", () => {
-    expect(pickNext([task("A", "pending", ["B", "C"]), task("B", "pr"), task("C", "in_progress")])).toBeNull();
-    expect(pickNext([task("A", "pending", ["B", "C"]), task("B", "pr"), task("C", "pr")])?.id).toBe("A");
-  });
-
-  test("a pending dependency blocks its dependent but is itself picked", () => {
-    expect(pickNext([task("A", "pending", ["B"]), task("B")])?.id).toBe("B");
-  });
-
-  test("skips in_progress and pr tasks", () => {
-    expect(pickNext([task("A", "in_progress"), task("B", "pr"), task("C")])?.id).toBe("C");
-  });
-
-  test("returns null when empty or nothing is ready", () => {
-    expect(pickNext([])).toBeNull();
-    expect(pickNext([task("A", "pr"), task("B", "in_progress")])).toBeNull();
-  });
-
-  test("never picks a task with an unknown dependency", () => {
-    expect(pickNext([task("A", "pending", ["ghost"])])).toBeNull();
-  });
-});
-
 describe("runLoop", () => {
   const ok: Runner = async () => res();
 
-  test("moves each task pending -> in_progress -> pr, in dependency order", async () => {
+  test("moves a task pending -> in_progress -> pr; its dependent waits for the merge (hands-on)", async () => {
     const { store, history } = memStore([task("B", "pending", ["A"]), task("A")]);
-    expect(await runLoop(store, ok, undefined, fakeSleep())).toEqual({ ran: ["A", "B"], stoppedOn: null });
-    expect(history).toEqual(["A:in_progress", "A:pr", "B:in_progress", "B:pr"]);
+    expect(await runLoop(store, ok, undefined, fakeSleep())).toEqual({ ran: ["A"], stoppedOn: null });
+    expect(history).toEqual(["A:in_progress", "A:pr"]);
+  });
+
+  test("a dependent starts once its dependency is completed", async () => {
+    const { store, history } = memStore([task("B", "pending", ["A"]), task("A", "completed")]);
+    expect((await runLoop(store, ok, undefined, fakeSleep())).ran).toEqual(["B"]);
+    expect(history).toEqual(["B:in_progress", "B:pr"]);
   });
 
   test("marks the task in_progress while the runner executes", async () => {
@@ -237,7 +210,7 @@ describe("runLoop", () => {
   test("picks up tasks appended while the loop runs", async () => {
     const { store, tasks } = memStore([task("A")]);
     const run: Runner = async (t) => {
-      if (t.id === "A") tasks.push(task("B", "pending", ["A"]));
+      if (t.id === "A") tasks.push(task("B"));
       return res();
     };
     expect((await runLoop(store, run, undefined, fakeSleep())).ran).toEqual(["A", "B"]);
@@ -282,14 +255,14 @@ describe("runLoop PR routing", () => {
     return { source, attempts, calls, flagged, prs };
   }
 
-  test("runs the oldest candidate first across tasks and PRs", async () => {
+  test("reviews every PR before starting a new task, oldest PR first", async () => {
     const w = world([pr(7, { createdAt: "2026-10-29T10:00:00.000Z" }), pr(9, { createdAt: "2026-10-29T12:00:00.000Z" })]);
     const { store } = memStore([stamped("T1", "2026-10-29T11:00:00.000Z")]);
     const order: string[] = [];
     const run: Runner = async (t) => { order.push(`task ${t.id}`); return res(); };
     const runPr: PrRunner = async (p, a) => { order.push(`${a} ${p.number}`); return res(); };
     await runLoop(store, run, undefined, { ...fakeSleep(), prs: w.source, attempts: w.attempts, runPr });
-    expect(order.slice(0, 3)).toEqual(["review 7", "task T1", "review 9"]);
+    expect(order.slice(0, 3)).toEqual(["review 7", "review 9", "task T1"]);
   });
 
   test("a review and a patch route to their own command with {pr} substituted", async () => {

@@ -3,6 +3,7 @@ import type { AgentResult } from "./agent-result.ts";
 import { runLoop, type RunResult, type Runner } from "./loop.ts";
 import type { AttemptsStore } from "./pr-attempts.ts";
 import type { ClosedPr, PrSource, PullRequest } from "./prs.ts";
+import { DEFAULT_SETTINGS, type Settings } from "./settings.ts";
 import type { Task, TaskStatus } from "./tasks.schema.ts";
 import type { TaskStore } from "./tasks.store.ts";
 
@@ -299,5 +300,105 @@ describe("runLoop PR tracking", () => {
     await runLoop(store, ok, undefined, options(source));
     expect(tasks[0]?.status).toBe("completed");
     expect(tasks[0]?.pr?.number).toBe(12);
+  });
+});
+
+describe("runLoop hands-off stacks", () => {
+  const HANDS_OFF: Settings = { ...DEFAULT_SETTINGS, defaultMode: "hands-off" };
+  /** Attempts whose last successful review of each PR is the given SHA. */
+  const reviewed = (shas: Record<number, string>): AttemptsStore => ({
+    ...NOOP_ATTEMPTS,
+    get: (n) => (shas[n] === undefined ? undefined : { reviews: 1, patches: 0, reviewedSha: shas[n] }),
+  });
+  const ok: Runner = async () => res();
+  const clean = (number: number, branch: string, headSha: string) => pr(number, branch, { headSha, reviewDecision: "none" });
+
+  test("hands-on: a dependent does not start on an approved, unmerged dependency", async () => {
+    const { store, tasks } = memStore([task("A", "pr"), { ...task("B"), dependencies: ["A"] }]);
+    const source: PrSource = { list: async () => [clean(7, "feat/A", "a1")] };
+    const out = await runLoop(store, ok, undefined, { ...fakeSleep(), prs: source, attempts: reviewed({ 7: "a1" }), runPr: async () => res() });
+    expect(out.ran).toEqual([]);
+    expect(tasks[1]?.status).toBe("pending");
+  });
+
+  test("hands-off: it starts once the dependency passed taste_test cleanly, and records what it is stacked on", async () => {
+    const { store, tasks } = memStore([task("A", "pr"), { ...task("B"), dependencies: ["A"] }]);
+    const source: PrSource = { list: async () => [clean(7, "feat/A", "a1")] };
+    const out = await runLoop(store, ok, undefined, {
+      ...fakeSleep(),
+      prs: source,
+      attempts: reviewed({ 7: "a1" }),
+      runPr: async () => res(),
+      settings: () => HANDS_OFF,
+    });
+    expect(out.ran).toEqual(["B"]);
+    expect(tasks[1]?.builtOn).toEqual({ A: "a1" });
+  });
+
+  test("hands-off: an unreviewed dependency is reviewed first, then the dependent starts", async () => {
+    const { store } = memStore([task("A", "pr"), { ...task("B"), dependencies: ["A"] }]);
+    const source: PrSource = { list: async () => [clean(7, "feat/A", "a1")] };
+    const shas: Record<number, string> = {};
+    const order: string[] = [];
+    const out = await runLoop(
+      store,
+      async (t) => {
+        order.push(`cook ${t.id}`);
+        return res();
+      },
+      undefined,
+      {
+        ...fakeSleep(),
+        prs: source,
+        attempts: {
+          ...reviewed(shas),
+          record: (n, _kind, sha) => {
+            shas[n] = sha;
+          },
+        },
+        runPr: async (p, action) => {
+          order.push(`${action} ${p.number}`);
+          return res();
+        },
+        settings: () => HANDS_OFF,
+      },
+    );
+    expect(order).toEqual(["review 7", "cook B"]);
+    expect(out.ran).toEqual(["B"]);
+  });
+
+  test("a dependency with new commits gets its stacked dependent patched, then the new base is remembered", async () => {
+    const { store, tasks } = memStore([task("A", "pr"), { ...task("B", "pr"), dependencies: ["A"], builtOn: { A: "a1" } }]);
+    const source: PrSource = { list: async () => [clean(7, "feat/A", "a2"), clean(8, "feat/B", "b1")] };
+    const ran: string[] = [];
+    await runLoop(store, ok, undefined, {
+      ...fakeSleep(2),
+      prs: source,
+      attempts: reviewed({ 7: "a2", 8: "b1" }),
+      runPr: async (p, action) => {
+        ran.push(`${action} ${p.number}`);
+        return res();
+      },
+      settings: () => HANDS_OFF,
+    });
+    expect(ran).toEqual(["patch 8"]);
+    expect(tasks[1]?.builtOn).toEqual({ A: "a2" });
+  });
+
+  test("unreadable settings fall back to hands-on and are logged", async () => {
+    const { store } = memStore([task("A", "pr"), { ...task("B"), dependencies: ["A"] }]);
+    const source: PrSource = { list: async () => [clean(7, "feat/A", "a1")] };
+    const logs: string[] = [];
+    const out = await runLoop(store, ok, (m) => logs.push(m), {
+      ...fakeSleep(),
+      prs: source,
+      attempts: reviewed({ 7: "a1" }),
+      runPr: async () => res(),
+      settings: () => {
+        throw new Error("bad json");
+      },
+    });
+    expect(out.ran).toEqual([]);
+    expect(logs.some((m) => m.includes("bad json"))).toBe(true);
   });
 });

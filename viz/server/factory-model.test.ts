@@ -151,7 +151,7 @@ describe("waterfall", () => {
     const detail = m.details.get("order-a")!;
     expect(detail.phases.map((p) => [p.owner, p.name, p.status, p.description])).toEqual([
       ["a", "cook", "success", "PR #1 opened"],
-      ["b", "cook", "queued", "waiting on z (other order)"],
+      ["b", "cook", "queued", "waiting on a, z (other order)"],
     ]);
     expect(detail.lane_meta.b).toEqual({ title: "b", subtitle: "needs a, z (other order)" });
   });

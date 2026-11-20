@@ -833,7 +833,8 @@ export function buildModel(snap: Snapshot): Model {
       if (task && task.status === "pending" && !rs.some((r) => r.status === "running")) {
         const waitingOn = deps.filter((d) => {
           const dep = taskById.get(d);
-          return !dep || !isDependencyDone(dep.status);
+          // Shown as waiting until the dependency is completed; a deleted one is not waited for.
+          return dep !== undefined && dep.status !== "completed";
         });
         phases.push({
           phase_id: `queued:${task.id}`,

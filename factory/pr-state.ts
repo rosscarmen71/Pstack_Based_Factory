@@ -4,8 +4,9 @@
 //   1. draft, or labelled `needs-human`                  -> none
 //   2. an unanswered `/customize_order` comment          -> none (a human runs that skill by hand)
 //   3. CI failed, merge conflict, changes requested,
-//      labelled `changes-requested`, or an unanswered
-//      `/remake` comment                                 -> patch
+//      labelled `changes-requested`, an unanswered
+//      `/remake` comment, or a dependency it is stacked
+//      on has new commits                                -> patch
 //   4. approved with CI passing                          -> none
 //   5. head SHA differs from reviewedSha, CI not failing -> review
 //   6. anything else                                     -> none
@@ -23,6 +24,8 @@ export type PrAction = "review" | "patch" | "none";
 export interface PrHistory {
   /** Head SHA of the last review we ran on this PR, if any. */
   reviewedSha?: string;
+  /** True when a dependency this PR's task is stacked on has new commits since the task was built or last updated. */
+  dependencyMoved?: boolean;
 }
 
 export const REMAKE_COMMAND = "/remake";
@@ -61,6 +64,7 @@ export function decidePr(
   if (pr.ci === "fail" || pr.mergeable === "conflicting" || pr.reviewDecision === "changes_requested") return "patch";
   if (pr.labels.includes(CHANGES_REQUESTED_LABEL)) return "patch";
   if (pendingRequest(pr, REMAKE_COMMAND, REMAKE_SUMMARY_HEADING)) return "patch";
+  if (history.dependencyMoved) return "patch";
   if (pr.reviewDecision === "approved" && pr.ci === "pass") return "none";
   if (pr.headSha !== history.reviewedSha) return "review";
   return "none";

@@ -147,7 +147,7 @@ describe("startQueueServer", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const html = await res.text();
-    const order = ["a-task", "#7", "b-task"].map((ref) => html.indexOf(`<code>${ref}</code>`));
+    const order = ["#7", "a-task", "b-task"].map((ref) => html.indexOf(`<code>${ref}</code>`));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
@@ -160,8 +160,8 @@ describe("startQueueServer", () => {
     expect(res.headers.get("content-type")).toContain("application/json");
     const body = (await res.json()) as { running: Task[]; queue: Array<{ position: number; ref: string; kind: string }>; error?: string };
     expect(body.queue.map((q) => [q.position, q.kind, q.ref])).toEqual([
-      [1, "dev-task", "a-task"],
-      [2, "review", "#7"],
+      [1, "review", "#7"],
+      [2, "dev-task", "a-task"],
       [3, "dev-task", "b-task"],
     ]);
     expect(body.running.map((t) => t.id)).toEqual(["running-task"]);

@@ -4,10 +4,12 @@
 import { AGENT_RESULT_SCHEMA, parseAgentResult, toAuditOutcome, type AgentResult } from "./agent-result.ts";
 import { auditStore, type AuditAction, type AuditStore } from "./audit-log.ts";
 import { pickCandidate } from "./candidates.ts";
+import { stackBase, taskOfPr } from "./gate.ts";
 import { acquireLoopLock, type AcquireOptions } from "./loop-lock.ts";
 import { attemptsStore, type AttemptsStore } from "./pr-attempts.ts";
 import { ghPrSource, type ClosedPr, type PrSource, type PullRequest } from "./prs.ts";
-import { isDependencyDone, type Task } from "./tasks.schema.ts";
+import { DEFAULT_SETTINGS, settingsStore, type Settings } from "./settings.ts";
+import type { Task } from "./tasks.schema.ts";
 import { fileStore, type TaskStore } from "./tasks.store.ts";
 
 /** Claude Code headless, running the cook skill for one task. `{id}` is substituted. */
@@ -39,12 +41,6 @@ export const AGENT_CMD: string[] = ["claude", "-p", "/cook {id}", "--allowedTool
 /** Claude Code headless, reviewing or patching one open PR. `{pr}` is substituted with the PR number. */
 export const REVIEW_CMD: string[] = ["claude", "-p", "/taste_test {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
 export const PATCH_CMD: string[] = ["claude", "-p", "/remake {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
-
-/** First pending task whose dependencies have all reached `pr` or `completed`, else null. */
-export function pickNext(tasks: Task[]): Task | null {
-  const done = new Set(tasks.filter((t) => isDependencyDone(t.status)).map((t) => t.id));
-  return tasks.find((t) => t.status === "pending" && t.dependencies.every((d) => done.has(d))) ?? null;
-}
 
 /** What one agent run produced: the process exit code and its result report, null when there was no valid one. */
 export interface RunResult {
@@ -91,6 +87,8 @@ export interface LoopOptions {
   sleep?: (ms: number) => Promise<unknown>;
   /** Aborting stops the loop: immediately when idle, after the current task otherwise. */
   signal?: AbortSignal;
+  /** Read on every poll, so a mode flip takes effect at the next start. Defaults to the built-in defaults. */
+  settings?: () => Settings;
 }
 
 /** Resolves after `ms` via `sleep`, or as soon as the signal aborts. */
@@ -118,7 +116,7 @@ export async function runLoop(
   store: TaskStore,
   run: Runner,
   log: (msg: string) => void = () => {},
-  { sleep = Bun.sleep, signal, prs, attempts = NO_ATTEMPTS, runPr, audit = NO_AUDIT }: LoopOptions = {},
+  { sleep = Bun.sleep, signal, prs, attempts = NO_ATTEMPTS, runPr, audit = NO_AUDIT, settings = () => DEFAULT_SETTINGS }: LoopOptions = {},
 ): Promise<LoopResult> {
   const ran: string[] = [];
   let stuckKey = "";
@@ -220,7 +218,13 @@ export async function runLoop(
       }
     }
 
-    const { candidate, newlyExceeded } = pickCandidate(tasks, open, attempts);
+    let current = DEFAULT_SETTINGS;
+    try {
+      current = settings();
+    } catch (err) {
+      log(`could not read settings, using the defaults: ${errMsg(err)}`);
+    }
+    const { candidate, newlyExceeded } = pickCandidate(tasks, open, attempts, current);
     for (const pr of newlyExceeded) {
       try {
         await attempts.flagForHuman(pr.number);
@@ -253,6 +257,9 @@ export async function runLoop(
       // A failed write is not caught: without the count the same PR would be rerun forever.
       const ok = code === 0 && outcome.report !== null;
       attempts.record(pr.number, action, pr.headSha, ok);
+      // A patch brought the task up to its dependencies' current commits: remember them, so it is not patched again.
+      const owner = action === "patch" && ok ? taskOfPr(pr, tasks) : undefined;
+      if (owner?.builtOn) track(owner.id, { builtOn: stackBase(owner, { tasks, prs: open }) });
       if (!ok) log(`PR #${pr.number} ${action} failed (exit ${code}${outcome.report ? "" : ", no result report"}); continuing`);
       continue;
     }
@@ -275,6 +282,9 @@ export async function runLoop(
 
     log(`starting ${next.id}: ${next.title}`);
     store.setStatus(next.id, "in_progress");
+    // The unmerged dependencies it is about to be stacked on, so a later commit on one of them is noticed.
+    const base = stackBase(next, { tasks, prs: open });
+    if (Object.keys(base).length > 0 || next.builtOn) track(next.id, { builtOn: Object.keys(base).length > 0 ? base : undefined });
     ran.push(next.id);
 
     let outcome: RunResult;
@@ -375,7 +385,7 @@ function clock(iso: string): string {
 export async function main(
   store: TaskStore = fileStore(),
   agentCmd: string[] = AGENT_CMD,
-  { sleep, signal, prs, attempts, runPr, audit, lock: lockOptions }: MainOptions = {},
+  { sleep, signal, prs, attempts, runPr, audit, settings, lock: lockOptions }: MainOptions = {},
   { reviewCmd = REVIEW_CMD, patchCmd = PATCH_CMD }: PrCommands = {},
 ): Promise<number> {
   store.load(); // validate up front
@@ -398,6 +408,7 @@ export async function main(
       attempts,
       runPr: runPr ?? prRunner(reviewCmd, patchCmd),
       audit,
+      settings,
     });
     return stoppedOn ? 1 : 0;
   } finally {
@@ -414,6 +425,7 @@ if (import.meta.main) {
       prs: ghPrSource(),
       attempts: attemptsStore(),
       audit: auditStore(),
+      settings: () => settingsStore().load(),
     }),
   );
 }
