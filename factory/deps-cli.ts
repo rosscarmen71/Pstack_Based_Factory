@@ -1,16 +1,18 @@
 // Command line for the dependency skills. It lists what to compare, writes what was decided, and reports what a
 // task is still waiting for. The skills judge; this only reads and writes facts.
 //
-//   bun factory/deps-cli.ts candidates [--for <task-id>] [--project <name>]
-//   bun factory/deps-cli.ts set <task-id> '{"<dependency-id>": "<one-line reason>", ...}'
-//   bun factory/deps-cli.ts blockers <task-id>
+// Reached as `factory deps ...` (cli.ts), which picks the project from the folder it is run in:
+//
+//   factory deps candidates [--for <task-id>]
+//   factory deps set <task-id> '{"<dependency-id>": "<one-line reason>", ...}'
+//   factory deps blockers <task-id>
 
 import { checkDependencies, dependencyCandidates, setDependencies } from "./deps.ts";
 import { blockers, type DependencyState } from "./gate.ts";
-import { attemptsStore, type AttemptsStore } from "./pr-attempts.ts";
-import { ghPrSource, type PrSource } from "./prs.ts";
-import { resolveMode, type Settings, settingsStore } from "./settings.ts";
-import { fileStore, type TaskStore } from "./tasks.store.ts";
+import type { AttemptsStore } from "./pr-attempts.ts";
+import type { PrSource } from "./prs.ts";
+import { resolveMode, type Settings } from "./settings.ts";
+import type { TaskStore } from "./tasks.store.ts";
 
 export interface CliDeps {
   store: TaskStore;
@@ -26,9 +28,9 @@ export interface CliResult {
 }
 
 const USAGE = `usage:
-  bun factory/deps-cli.ts candidates [--for <task-id>] [--project <name>]
-  bun factory/deps-cli.ts set <task-id> '{"<dependency-id>": "<one-line reason>"}'
-  bun factory/deps-cli.ts blockers <task-id>`;
+  factory deps candidates [--for <task-id>]
+  factory deps set <task-id> '{"<dependency-id>": "<one-line reason>"}'
+  factory deps blockers <task-id>`;
 
 const flag = (args: string[], name: string): string | undefined => {
   const i = args.indexOf(name);
@@ -79,15 +81,4 @@ export async function runCli(args: string[], deps: CliDeps): Promise<CliResult> 
   } catch (e) {
     return fail(e instanceof Error ? e.message : String(e));
   }
-}
-
-if (import.meta.main) {
-  const { exitCode, output } = await runCli(process.argv.slice(2), {
-    store: fileStore(),
-    settings: () => settingsStore().load(),
-    prs: ghPrSource(),
-    attempts: attemptsStore(),
-  });
-  (exitCode === 0 ? console.log : console.error)(output);
-  process.exit(exitCode);
 }

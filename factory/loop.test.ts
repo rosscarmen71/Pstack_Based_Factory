@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_CMD,
+  agentCommands,
   agentRunner,
   ALLOWED_TOOLS,
   LOOP_IDLE_MS,
@@ -940,6 +941,47 @@ describe("runLoop scheduler", () => {
     };
     await runLoop(store, run, undefined, { ...s, settings: () => ({ ...DEFAULT_SETTINGS, paused }) });
     expect(started).toEqual(["A"]);
+  });
+
+  test("while the project waits on another project no new task starts, but PR work carries on", async () => {
+    const { store, tasks } = memStore([task("A")]);
+    const source: PrSource = { list: async () => [{ ...basePr(7) }] };
+    let waiting = ["acme/api"];
+    const order: string[] = [];
+    const states: LoopState[] = [];
+    const logs: string[] = [];
+    const s = fakeSleep(3, (n) => {
+      if (n === 1) {
+        expect(order).toEqual(["review 7"]);
+        expect(tasks[0]?.status).toBe("pending");
+        expect(states.at(-1)?.waitingOnProjects).toEqual(["acme/api"]);
+        waiting = [];
+      }
+    });
+    const run: Runner = async (t) => {
+      order.push(`cook ${t.id}`);
+      return res();
+    };
+    const runPr: PrRunner = async (p, action) => {
+      order.push(`${action} ${p.number}`);
+      return res();
+    };
+    await runLoop(store, run, (m) => logs.push(m), { ...s, prs: source, attempts: reviewingAttempts(), runPr, blockedBy: () => waiting, onState: (st) => states.push(st) });
+    expect(order).toEqual(["review 7", "cook A"]);
+    expect(logs.filter((m) => m.includes("waiting on project acme/api"))).toHaveLength(1);
+    expect(logs.some((m) => m.includes("no longer waiting"))).toBe(true);
+    expect(states.at(-1)?.waitingOnProjects).toBeUndefined();
+  });
+
+  test("agentCommands adds the extra tools and readable folders to all three commands", () => {
+    const c = agentCommands(["Bash(/h/bin/factory *)"], ["/h/projects/acme__api"]);
+    for (const cmd of [c.cook, c.review, c.patch]) {
+      expect(cmd[cmd.indexOf("--allowedTools") + 1]).toBe([...ALLOWED_TOOLS, "Bash(/h/bin/factory *)"].join(","));
+      expect(cmd[cmd.indexOf("--add-dir") + 1]).toBe("/h/projects/acme__api");
+    }
+    expect(c.cook[2]).toBe("/cook {id}");
+    expect(c.patch[2]).toBe("/remake {pr}");
+    expect(agentCommands().cook).toEqual(AGENT_CMD);
   });
 
   test("the published state lists what is running", async () => {

@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "loop": "bun factory/loop.ts",
+    "loop": "bun factory/cli.ts start",
     "queue": "bun factory/queue-server.ts",
     "viz": "bun viz/launch.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
-    "test": "bun test"
+    "test": "bun test",
+    "factory": "bun factory/cli.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.8",

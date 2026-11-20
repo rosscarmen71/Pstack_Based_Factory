@@ -4,17 +4,17 @@
 
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { AGENT_RESULT_SCHEMA, parseAgentResult, parseUsageLimit, toAuditOutcome, type AgentResult, type UsageLimit } from "./agent-result.ts";
-import { auditStore, type AuditAction, type AuditStore } from "./audit-log.ts";
+import type { AuditAction, AuditStore } from "./audit-log.ts";
 import { rankAll } from "./candidates.ts";
 import { bunGit, deleteBranches } from "./delete-task.ts";
 import { stackBase, taskOfPr } from "./gate.ts";
 import { acquireLoopLock, type AcquireOptions } from "./loop-lock.ts";
-import { attemptsStore, type AttemptsStore } from "./pr-attempts.ts";
-import { ghPrSource, type ClosedPr, type PrSource, type PullRequest } from "./prs.ts";
-import { DEFAULT_SETTINGS, resolveMode, settingsStore, type Settings } from "./settings.ts";
+import type { AttemptsStore } from "./pr-attempts.ts";
+import type { ClosedPr, GhResult, PrSource, PullRequest } from "./prs.ts";
+import { DEFAULT_SETTINGS, resolveMode, type Settings } from "./settings.ts";
 import type { Task } from "./tasks.schema.ts";
 import { fileStore, type TaskStore } from "./tasks.store.ts";
-import { gitWorktrees, type Workspaces, worktreeName } from "./worktrees.ts";
+import { type Workspaces, worktreeName } from "./worktrees.ts";
 
 /** Claude Code headless, running the cook skill for one task. `{id}` is substituted. */
 export const ALLOWED_TOOLS: string[] = [
@@ -40,11 +40,33 @@ export const ALLOWED_TOOLS: string[] = [
 /** Flags that make the agent end with a schema-checked result report in a JSON envelope on stdout. */
 const REPORT_FLAGS: string[] = ["--output-format", "json", "--json-schema", JSON.stringify(AGENT_RESULT_SCHEMA)];
 
-export const AGENT_CMD: string[] = ["claude", "-p", "/cook {id}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
+export interface AgentCommands {
+  /** Runs the cook skill for one task. `{id}` is substituted. */
+  cook: string[];
+  /** Reviews one open PR. `{pr}` is substituted with the PR number. */
+  review: string[];
+  /** Patches one open PR. `{pr}` is substituted with the PR number. */
+  patch: string[];
+}
 
-/** Claude Code headless, reviewing or patching one open PR. `{pr}` is substituted with the PR number. */
-export const REVIEW_CMD: string[] = ["claude", "-p", "/taste_test {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
-export const PATCH_CMD: string[] = ["claude", "-p", "/remake {pr}", "--allowedTools", ALLOWED_TOOLS.join(","), ...REPORT_FLAGS];
+/**
+ * The three agent commands. `extraTools` are allowed on top of ALLOWED_TOOLS (the factory's own command, which the
+ * skills call to reach the task queue); `addDirs` are folders outside the checkout the agent may read (the
+ * project's folder in the factory's home, where that queue lives).
+ */
+export function agentCommands(extraTools: string[] = [], addDirs: string[] = []): AgentCommands {
+  const tail = ["--allowedTools", [...ALLOWED_TOOLS, ...extraTools].join(","), ...addDirs.flatMap((d) => ["--add-dir", d]), ...REPORT_FLAGS];
+  return {
+    cook: ["claude", "-p", "/cook {id}", ...tail],
+    review: ["claude", "-p", "/taste_test {pr}", ...tail],
+    patch: ["claude", "-p", "/remake {pr}", ...tail],
+  };
+}
+
+const DEFAULT_COMMANDS = agentCommands();
+export const AGENT_CMD: string[] = DEFAULT_COMMANDS.cook;
+export const REVIEW_CMD: string[] = DEFAULT_COMMANDS.review;
+export const PATCH_CMD: string[] = DEFAULT_COMMANDS.patch;
 
 /** What one agent run produced: the process exit code and its result report, null when there was no valid one. */
 export interface RunResult {
@@ -106,6 +128,11 @@ export interface LoopOptions {
   onState?: (state: LoopState) => void;
   /** Cleans up after tasks found in progress with no agent (their worktree and half-finished branch). */
   recover?: (orphans: Task[]) => void | Promise<void>;
+  /**
+   * The projects this one still waits on (project dependencies with unfinished tasks). While it returns any, no
+   * new task starts; reviews and patches of existing PRs carry on.
+   */
+  blockedBy?: () => string[];
 }
 
 /** Resolves after `ms` via `sleep`, or as soon as the signal aborts. */
@@ -138,6 +165,8 @@ export interface LoopState {
   running: RunningItem[];
   /** Set while a usage limit holds every start back: when starts resume (ISO 8601). */
   pausedUntil?: string;
+  /** Projects this one depends on that still have unfinished tasks; while any are listed no new task starts. */
+  waitingOnProjects?: string[];
 }
 
 /**
@@ -164,6 +193,7 @@ export async function runLoop(
     now = Date.now,
     onState = () => {},
     recover = () => {},
+    blockedBy = () => [],
   }: LoopOptions = {},
 ): Promise<LoopResult> {
   const ran: string[] = [];
@@ -174,6 +204,7 @@ export async function runLoop(
   /** Bumped whenever a run ends, so a poll that was reading while it ended starts over on fresh facts. */
   let generation = 0;
   let pausedUntil = 0;
+  let waitingOn: string[] = [];
   let woken = false;
   let wake = () => {};
 
@@ -182,6 +213,7 @@ export async function runLoop(
       onState({
         running: [...running.values()].map(({ kind, target, startedAt }) => ({ kind, target, startedAt })),
         ...(pausedUntil > now() ? { pausedUntil: new Date(pausedUntil).toISOString() } : {}),
+        ...(waitingOn.length > 0 ? { waitingOnProjects: waitingOn } : {}),
       });
     } catch (err) {
       log(`could not publish the loop state: ${errMsg(err)}`);
@@ -439,9 +471,23 @@ export async function runLoop(
     if (generation !== seen) return "retry";
     if (pausedUntil > now() || current.paused) return "nothing";
 
+    let blocked: string[] = [];
+    try {
+      blocked = blockedBy();
+    } catch (err) {
+      log(`could not check the projects this one depends on: ${errMsg(err)}`);
+    }
+    if (blocked.join() !== waitingOn.join()) {
+      waitingOn = blocked;
+      log(blocked.length > 0 ? `waiting on project ${blocked.join(", ")}: no new task starts until it is finished` : "no longer waiting on another project");
+      publish();
+    }
+
     let started = false;
     for (const c of candidates) {
       if (running.size >= current.agentCap) break;
+      // A project dependency holds back new tasks only; PR work carries on.
+      if (c.kind === "task" && blocked.length > 0) continue;
       if (c.kind === "pr") {
         if (running.has(`pr:${c.pr.number}`)) continue;
         startPr(c.pr, c.action, tasks, open);
@@ -549,13 +595,17 @@ export function readLoopState(path: string = LOOP_STATE_PATH): LoopState {
 }
 
 /** After a crash: drop the orphaned tasks' worktrees and the half-finished branches of those with no PR yet. */
-export function cleanUpOrphans(workspaces: Workspaces, log: (msg: string) => void): (orphans: Task[]) => Promise<void> {
+export function cleanUpOrphans(
+  workspaces: Workspaces,
+  log: (msg: string) => void,
+  git: (args: string[]) => Promise<GhResult> = bunGit,
+): (orphans: Task[]) => Promise<void> {
   return async (orphans) => {
     for (const task of orphans) {
       await workspaces.remove(worktreeName("cook", task.id));
       if (task.pr) continue;
       const warnings: string[] = [];
-      const deleted = await deleteBranches(task.id, bunGit, warnings);
+      const deleted = await deleteBranches(task.id, git, warnings);
       if (deleted.length > 0) log(`${task.id}: discarded half-finished ${deleted.join(", ")}`);
       for (const w of warnings) log(`${task.id}: ${w}`);
     }
@@ -621,17 +671,4 @@ export async function main(
     signal?.removeEventListener("abort", stop);
     lock.release();
   }
-}
-
-if (import.meta.main) {
-  process.exit(
-    await main(fileStore(), AGENT_CMD, {
-      prs: ghPrSource(),
-      attempts: attemptsStore(),
-      audit: auditStore(),
-      settings: () => settingsStore().load(),
-      workspaces: gitWorktrees(),
-      onState: (state) => writeLoopState(state),
-    }),
-  );
 }
