@@ -5,6 +5,8 @@ import type { Task } from "../../factory/tasks.schema.ts";
 import {
   buildModel,
   depState,
+  isBucketId,
+  ordersOf,
   groupOrders,
   milestoneFor,
   runStatus,
@@ -146,6 +148,29 @@ describe("task info for the controls", () => {
     expect(by("s2")).toMatchObject({ completed: false, task_count: 1, mode: { mode: "hands-on", from: "session", own: "hands-on", inherited: "hands-off" } });
     // An older order with no stored session id cannot carry a mode of its own.
     expect(by("order-old").mode).toBeNull();
+  });
+});
+
+describe("a snapshot of a named project", () => {
+  test("every session reports the project, and the catch-all buckets carry it in their id", () => {
+    const m = buildModel(
+      snap({
+        projectName: "acme/api",
+        tasks: [task("a", { session: "s1" }), task("old", { createdAt: undefined })],
+        audit: [audit({ action: "review", target: 2 })],
+        transcripts: [transcript({ kind: "taste_test", target: "2" })],
+        prs: [pr({ number: 2, branch: "refactor/x" })],
+      }),
+    );
+    expect(m.sessions.map((s) => [s.adw_id, s.project]).toSorted()).toEqual([
+      ["s1", "acme/api"],
+      ["tasks-without-a-date@acme/api", "acme/api"],
+      ["unlinked-prs@acme/api", "acme/api"],
+    ]);
+    expect(isBucketId("unlinked-prs@acme/api")).toBe(true);
+    expect(isBucketId("tasks-without-a-date")).toBe(true);
+    expect(isBucketId("s1")).toBe(false);
+    expect(ordersOf([task("old", { createdAt: undefined })], "acme/api")[0]?.id).toBe("tasks-without-a-date@acme/api");
   });
 });
 
@@ -582,7 +607,7 @@ describe("customize_order", () => {
     const m = buildModel(
       snap({ tasks: [task("a", { status: "pr" })], transcripts: [transcript({ target: "a" })], prs: [pr({})] }),
     );
-    expect(m.details.get("order-a")?.lane_meta.a?.pr).toEqual({ number: 1, url: "https://github.com/o/r/pull/1" });
+    expect(m.details.get("order-a")?.lane_meta.a?.pr).toMatchObject({ number: 1, url: "https://github.com/o/r/pull/1" });
   });
 
   test("merging or closing the PR resolves a pending request", () => {

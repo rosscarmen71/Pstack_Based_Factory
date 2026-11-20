@@ -15,8 +15,8 @@
  *   - POST /api/factory changes the factory-wide switches (default mode, agent cap, pause) in factory/settings.json.
  *     POST /api/projects/:name/mode, /api/sessions/:adw_id/mode and /api/tasks/:id/mode set or clear the mode at
  *     that level. POST /api/tasks/:id/dependencies adds or removes one dependency of a task.
- *   - POST /api/sessions/:adw_id/project writes the optional `project` field of each task in that order, in
- *     factory/tasks.json (through the task store, so it never clobbers the loop's own writes).
+ *   - POST /api/projects adds a repository as a project; DELETE /api/projects/:name removes one with all its tasks;
+ *     POST /api/projects/:name/depends-on and /paused set what it waits for and whether its loop is paused.
  * factory-source.ts also keeps viz/.needs-history.jsonl, and the agent manager keeps viz/.customize-agents.json.
  * Nothing else here writes to the factory's files.
  *
@@ -24,17 +24,14 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { auditStore } from "../../factory/audit-log.ts";
 import { deleteTask, previewDelete, type DeleteReport } from "../../factory/delete-task.ts";
-import { attemptsStore } from "../../factory/pr-attempts.ts";
 import { checkDependencies, setDependencies } from "../../factory/deps.ts";
-import { readLoopState } from "../../factory/loop.ts";
+import { readLoopState, type LoopState } from "../../factory/loop.ts";
+import { type ProjectContext, projectRegistry, registerRepo, waitingOnProjects } from "../../factory/projects.ts";
 import { MAX_AGENT_CAP, type Settings, settingsStore } from "../../factory/settings.ts";
-import { TASK_MODES, type TaskMode } from "../../factory/tasks.schema.ts";
-import { fileStore } from "../../factory/tasks.store.ts";
-import { groupOrders } from "./factory-model.ts";
-import { customize, invalidate, isRunSession, load, readFeed, removeRunTranscripts, runCwd } from "./factory-source.ts";
-import { parseProjectBody, setOrderProject } from "./projects.ts";
+import { TASK_MODES, type Task, type TaskMode } from "../../factory/tasks.schema.ts";
+import { type Order, ordersOf } from "./factory-model.ts";
+import { allContexts, contextOf, customizeFor, invalidate, isRunSession, load, readFeed, removeRunTranscripts, runCwd, transcriptDirsOf } from "./factory-source.ts";
 import type { AnswerBody, ReplyBody } from "../shared/customize.ts";
 import type { ApiError, EventsPage, HealthResponse } from "../shared/types.ts";
 
@@ -107,6 +104,9 @@ function prParam(req: Request): number | null {
   return Number.isSafeInteger(pr) ? pr : null;
 }
 
+/** Which repository a PR number is in, from `?project=owner/repo`. */
+const projectQuery = (req: Request): string | null => new URL(req.url).searchParams.get("project");
+
 const badPr = () => json({ error: "pr must be a positive integer" } satisfies ApiError, 400);
 const badBody = (message: string) => json({ error: message } satisfies ApiError, 400);
 const conflict = (message: string) => json({ error: message } satisfies ApiError, 409);
@@ -139,9 +139,41 @@ function setLevelMode(map: "projects" | "sessions", key: string, mode: TaskMode 
   });
 }
 
-/** Deletes one task with the real stores, GitHub and git, run from the repo root. */
-const removeTask = (id: string): Promise<DeleteReport | null> =>
-  deleteTask(id, { store: fileStore(), audit: auditStore(), attempts: attemptsStore(), removeTranscripts: removeRunTranscripts });
+/** The task and the project it belongs to, looked for in every project. */
+function findTask(id: string): { ctx: ProjectContext; task: Task } | null {
+  for (const ctx of allContexts()) {
+    const task = ctx.store.load().find((t) => t.id === id);
+    if (task) return { ctx, task };
+  }
+  return null;
+}
+
+/** The session (with at least one task) and the project it belongs to, looked for in every project. */
+function findSession(id: string): { ctx: ProjectContext; order: Order } | null {
+  for (const ctx of allContexts()) {
+    const order = ordersOf(ctx.store.load(), ctx.project.name).find((o) => o.id === id && o.taskIds.length > 0);
+    if (order) return { ctx, order };
+  }
+  return null;
+}
+
+/** Deletes one task of a project with that project's stores, and GitHub and git run in its checkout. */
+const removeTaskIn = (ctx: ProjectContext, id: string): Promise<DeleteReport | null> =>
+  deleteTask(id, {
+    store: ctx.store,
+    audit: ctx.audit,
+    attempts: ctx.attempts,
+    gh: ctx.gh,
+    git: ctx.git,
+    removeTranscripts: (target) => removeRunTranscripts(target, transcriptDirsOf(ctx.project.name)),
+  });
+
+/** What the top bar shows of the loops: every running agent, and the latest usage-limit pause. */
+function combinedLoopState(contexts: ProjectContext[]): LoopState {
+  const states = contexts.map((ctx) => readLoopState(ctx.paths.loopState));
+  const paused = states.map((s) => s.pausedUntil).filter((p): p is string => !!p).toSorted();
+  return { running: states.flatMap((s) => s.running), ...(paused.length > 0 ? { pausedUntil: paused.at(-1) } : {}) };
+}
 
 const server = Bun.serve({
   port: PORT,
@@ -170,13 +202,13 @@ const server = Bun.serve({
       }),
       DELETE: safely(async (req) => {
         const id = param(req, "adw_id");
-        const order = groupOrders(fileStore().load()).find((o) => o.id === id && o.taskIds.length > 0);
-        if (!order) return notFound(`no session ${id}`);
+        const found = findSession(id);
+        if (!found) return notFound(`no session ${id}`);
         const reports: DeleteReport[] = [];
-        // One at a time: each delete rewrites tasks.json and may run git in the same checkout.
-        for (const taskId of order.taskIds) {
+        // One at a time: each delete rewrites the queue and may run git in the same checkout.
+        for (const taskId of found.order.taskIds) {
           // oxlint-disable-next-line no-await-in-loop
-          const report = await removeTask(taskId);
+          const report = await removeTaskIn(found.ctx, taskId);
           if (report) reports.push(report);
         }
         invalidate();
@@ -186,20 +218,22 @@ const server = Bun.serve({
 
     "/api/sessions/:adw_id/delete-preview": safely((req) => {
       const id = param(req, "adw_id");
-      const tasks = fileStore().load();
-      const order = groupOrders(tasks).find((o) => o.id === id && o.taskIds.length > 0);
-      if (!order) return notFound(`no session ${id}`);
-      return json(order.taskIds.flatMap((taskId) => previewDelete(tasks, taskId) ?? []));
+      const found = findSession(id);
+      if (!found) return notFound(`no session ${id}`);
+      const tasks = found.ctx.store.load();
+      return json(found.order.taskIds.flatMap((taskId) => previewDelete(tasks, taskId) ?? []));
     }),
 
     "/api/tasks/:id/delete-preview": safely((req) => {
-      const preview = previewDelete(fileStore().load(), param(req, "id"));
+      const found = findTask(param(req, "id"));
+      const preview = found ? previewDelete(found.ctx.store.load(), found.task.id) : null;
       return preview ? json(preview) : notFound(`no task ${param(req, "id")}`);
     }),
 
     "/api/tasks/:id": {
       DELETE: safely(async (req) => {
-        const report = await removeTask(param(req, "id"));
+        const found = findTask(param(req, "id"));
+        const report = found ? await removeTaskIn(found.ctx, found.task.id) : null;
         if (!report) return notFound(`no task ${param(req, "id")}`);
         invalidate();
         return json(report);
@@ -209,9 +243,21 @@ const server = Bun.serve({
     // The factory-wide switches and what the loop is doing right now.
     "/api/factory": {
       GET: safely(() => {
-        const tasks = fileStore().load();
-        const projects = [...new Set(tasks.map((t) => t.project).filter((p): p is string => !!p))].toSorted((a, b) => a.localeCompare(b));
-        return json({ settings: settingsStore().load(), loop: readLoopState(), projects, maxAgentCap: MAX_AGENT_CAP });
+        const contexts = allContexts();
+        const registry = projectRegistry();
+        return json({
+          settings: settingsStore().load(),
+          loop: combinedLoopState(contexts),
+          projects: contexts.map((ctx) => ({
+            name: ctx.project.name,
+            path: ctx.project.path,
+            paused: ctx.project.paused,
+            dependsOn: ctx.project.dependsOn,
+            waitingOn: waitingOnProjects(ctx.project, registry),
+            tasks: ctx.store.load().length,
+          })),
+          maxAgentCap: MAX_AGENT_CAP,
+        });
       }),
       POST: safely(async (req) => {
         const body = await bodyOf(req);
@@ -242,7 +288,7 @@ const server = Bun.serve({
         const name = param(req, "name");
         const mode = modeOf(await bodyOf(req));
         if (mode === undefined) return badBody(BAD_MODE);
-        if (!fileStore().load().some((t) => t.project === name)) return notFound(`no project ${name}`);
+        if (!contextOf(name)) return notFound(`no project ${name}`);
         setLevelMode("projects", name, mode);
         invalidate();
         return json({ ok: true, project: name, mode });
@@ -255,7 +301,7 @@ const server = Bun.serve({
         const mode = modeOf(await bodyOf(req));
         if (mode === undefined) return badBody(BAD_MODE);
         // Only a session whose tasks store its id can carry a setting of its own.
-        if (!fileStore().load().some((t) => t.session === id)) return notFound(`no session ${id} with a stored id`);
+        if (!allContexts().some((ctx) => ctx.store.load().some((t) => t.session === id))) return notFound(`no session ${id} with a stored id`);
         setLevelMode("sessions", id, mode);
         invalidate();
         return json({ ok: true, session: id, mode });
@@ -267,9 +313,9 @@ const server = Bun.serve({
         const id = param(req, "id");
         const mode = modeOf(await bodyOf(req));
         if (mode === undefined) return badBody(BAD_MODE);
-        const store = fileStore();
-        if (!store.load().some((t) => t.id === id)) return notFound(`no task ${id}`);
-        store.update(id, { mode: mode ?? undefined });
+        const found = findTask(id);
+        if (!found) return notFound(`no task ${id}`);
+        found.ctx.store.update(id, { mode: mode ?? undefined });
         invalidate();
         return json({ ok: true, id, mode });
       }),
@@ -280,9 +326,10 @@ const server = Bun.serve({
       POST: safely(async (req) => {
         const id = param(req, "id");
         const body = await bodyOf(req);
-        const store = fileStore();
-        const task = store.load().find((t) => t.id === id);
-        if (!task) return notFound(`no task ${id}`);
+        const found = findTask(id);
+        if (!found) return notFound(`no task ${id}`);
+        const { task } = found;
+        const store = found.ctx.store;
         const deps: Record<string, string> = Object.fromEntries(task.dependencies.map((d) => [d, task.dependencyReasons?.[d] ?? "added before reasons were recorded"]));
         if (typeof body?.remove === "string") {
           if (!(body.remove in deps)) return badBody(`${body.remove} is not a dependency of ${id}`);
@@ -307,9 +354,9 @@ const server = Bun.serve({
     "/api/tasks/:id/retry": {
       POST: safely((req) => {
         const id = param(req, "id");
-        const store = fileStore();
-        if (!store.load().some((t) => t.id === id)) return notFound(`no task ${id}`);
-        store.update(id, { needsYou: undefined, attempts: undefined });
+        const found = findTask(id);
+        if (!found) return notFound(`no task ${id}`);
+        found.ctx.store.update(id, { needsYou: undefined, attempts: undefined });
         invalidate();
         return json({ ok: true, id });
       }),
@@ -318,9 +365,9 @@ const server = Bun.serve({
     "/api/tasks/:id/complete": {
       POST: safely((req) => {
         const id = param(req, "id");
-        const store = fileStore();
-        if (!store.load().some((t) => t.id === id)) return notFound(`no task ${id}`);
-        store.complete(id);
+        const found = findTask(id);
+        if (!found) return notFound(`no task ${id}`);
+        found.ctx.store.complete(id);
         invalidate();
         return json({ ok: true, id });
       }),
@@ -329,16 +376,66 @@ const server = Bun.serve({
     // Their one write (archive) has no meaning here: the factory's records are not the reader's to change.
     "/api/sessions/:adw_id/archive": { POST: () => json({ error: "archiving is disabled" } satisfies ApiError, 405) },
 
-    "/api/sessions/:adw_id/project": {
+    // Projects are repositories: one is added by the path of its checkout, never by a made-up name.
+    "/api/projects": {
       POST: safely(async (req) => {
-        const id = param(req, "adw_id");
-        const input = parseProjectBody(await bodyOf(req));
-        if (!input.ok) return badBody(input.error);
-        const ids = setOrderProject(fileStore(), id, input.project);
-        if (!ids) return notFound(`no session ${id}`);
+        const body = await bodyOf(req);
+        if (typeof body?.path !== "string" || !body.path.trim()) return badBody("body must be {path: <folder of the repository>}");
+        try {
+          const project = await registerRepo(resolve(body.path.trim()));
+          invalidate();
+          return json(project);
+        } catch (e) {
+          return badBody((e as Error).message);
+        }
+      }),
+    },
+
+    // Removes a repository from the factory: every one of its tasks is deleted, and its loop stops. The repository
+    // itself is never touched beyond closing those tasks' PRs and deleting their branches.
+    "/api/projects/:name": {
+      DELETE: safely(async (req) => {
+        const name = param(req, "name");
+        const ctx = contextOf(name);
+        if (!ctx) return notFound(`no project ${name}`);
+        const reports: DeleteReport[] = [];
+        for (const task of ctx.store.load()) {
+          // oxlint-disable-next-line no-await-in-loop
+          const report = await removeTaskIn(ctx, task.id);
+          if (report) reports.push(report);
+        }
+        projectRegistry().remove(name);
         invalidate();
-        const session = (await load()).model.sessions.find((s) => s.adw_id === id);
-        return session ? json(session) : notFound(`no session ${id}`);
+        return json({ project: name, deleted: reports });
+      }),
+    },
+
+    "/api/projects/:name/depends-on": {
+      POST: safely(async (req) => {
+        const name = param(req, "name");
+        const body = await bodyOf(req);
+        const wanted = body?.dependsOn;
+        if (!Array.isArray(wanted) || !wanted.every((d) => typeof d === "string")) return badBody("body must be {dependsOn: [<project name>, ...]}");
+        try {
+          const project = projectRegistry().setDependsOn(name, wanted as string[]);
+          invalidate();
+          return json(project);
+        } catch (e) {
+          const message = (e as Error).message;
+          return message === `no project "${name}"` ? notFound(message) : badBody(message);
+        }
+      }),
+    },
+
+    "/api/projects/:name/paused": {
+      POST: safely(async (req) => {
+        const name = param(req, "name");
+        const body = await bodyOf(req);
+        if (typeof body?.paused !== "boolean") return badBody("body must be {paused: true or false}");
+        if (!contextOf(name)) return notFound(`no project ${name}`);
+        const project = projectRegistry().setPaused(name, body.paused);
+        invalidate();
+        return json(project);
       }),
     },
 
@@ -375,7 +472,9 @@ const server = Bun.serve({
 
     "/api/customize/:pr": safely((req) => {
       const pr = prParam(req);
-      return pr === null ? badPr() : json(customize.get(pr));
+      const host = pr === null ? null : customizeFor(pr, projectQuery(req));
+      if (pr === null) return badPr();
+      return host ? json(host.get(pr)) : notFound("no project to host the agent");
     }),
 
     "/api/customize/:pr/answer": {
@@ -387,7 +486,7 @@ const server = Bun.serve({
         if (typeof body?.id !== "string" || !answers || typeof answers !== "object" || !Object.values(answers).every((v) => typeof v === "string")) {
           return badBody("body must be {id, answers: {question: answer}}");
         }
-        const ok = customize.answer(pr, { id: body.id, answers: answers as Record<string, string> } satisfies AnswerBody);
+        const ok = customizeFor(pr, projectQuery(req))?.answer(pr, { id: body.id, answers: answers as Record<string, string> } satisfies AnswerBody) ?? false;
         return ok ? json({ ok: true }) : conflict("no open question with that id");
       }),
     },
@@ -398,7 +497,7 @@ const server = Bun.serve({
         if (pr === null) return badPr();
         const body = await bodyOf(req);
         if (typeof body?.text !== "string" || !body.text.trim()) return badBody("body must be {text}");
-        const ok = customize.reply(pr, (body as unknown as ReplyBody).text);
+        const ok = customizeFor(pr, projectQuery(req))?.reply(pr, (body as unknown as ReplyBody).text) ?? false;
         return ok ? json({ ok: true }) : conflict("the agent is not waiting for a reply");
       }),
     },

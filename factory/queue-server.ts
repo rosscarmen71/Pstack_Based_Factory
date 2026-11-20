@@ -3,11 +3,12 @@
 
 import { type AuditStore, auditStore } from "./audit-log.ts";
 import { buildHistory, type HistoryView, HISTORY_CSS, type OutcomeFilter, parseOutcomeFilter, renderHistoryHtml } from "./history-view.ts";
-import { type AttemptsStore, attemptsStore } from "./pr-attempts.ts";
-import { ghPrSource, type PrSource, type PullRequest } from "./prs.ts";
+import type { AttemptsStore } from "./pr-attempts.ts";
+import { projectContext, registerRepo } from "./projects.ts";
+import type { PrSource, PullRequest } from "./prs.ts";
 import { BANNER_CSS, buildQueue, renderQueueHtml } from "./queue-view.ts";
 import { DEFAULT_SETTINGS, type Settings, settingsStore } from "./settings.ts";
-import { fileStore, type TaskStore } from "./tasks.store.ts";
+import type { TaskStore } from "./tasks.store.ts";
 
 export const DEFAULT_QUEUE_PORT = 4040;
 export const PR_CACHE_MS = 10_000;
@@ -111,11 +112,14 @@ function parsePort(raw: string | undefined): number {
 }
 
 if (import.meta.main) {
+  // The queue of the repository this is run in.
+  const ctx = projectContext(await registerRepo(process.cwd()));
   const server = startQueueServer({
     port: parsePort(process.env.QUEUE_PORT),
-    store: fileStore(),
-    prs: ghPrSource(),
-    attempts: attemptsStore(),
+    store: ctx.store,
+    prs: ctx.prs,
+    attempts: ctx.attempts,
+    audit: ctx.audit,
   });
-  console.log(`queue view on http://${server.hostname}:${server.port}/`);
+  console.log(`queue view for ${ctx.project.name} on http://${server.hostname}:${server.port}/`);
 }

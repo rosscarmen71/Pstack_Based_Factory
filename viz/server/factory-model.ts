@@ -126,6 +126,11 @@ export interface Snapshot {
   now: number;
   /** Modes and caps; the built-in defaults when absent. */
   settings?: Settings;
+  /**
+   * The project (repository) this snapshot is of. When set, every session reports it and the two catch-all
+   * buckets carry it in their id, so buckets of different projects never collide.
+   */
+  projectName?: string;
 }
 
 // ── Outputs beyond their shared types ───────────────────────────────────────
@@ -181,7 +186,7 @@ export interface LaneMeta {
   /** The lane's task, when the lane is a task (not an unlinked PR). */
   task?: TaskInfo;
   /** The lane's pull request, when it has one: the run panel's "Open PR" button and customize card need it. */
-  pr?: { number: number; url: string };
+  pr?: { number: number; url: string; repo: string };
 }
 
 export type OrderStatus = "broken" | "running" | "done" | "waiting";
@@ -757,13 +762,24 @@ export function depState(id: string, reason: string | null, tasks: Map<string, T
   return { id, reason, met: false, text };
 }
 
+/** A project's sessions: groupOrders, with the undated bucket carrying the project in its id. */
+export function ordersOf(tasks: Task[], projectName?: string): Order[] {
+  return groupOrders(tasks).map((o) => (o.id === UNDATED_ID ? { ...o, id: bucketId(UNDATED_ID, projectName) } : o));
+}
+
+/** The id of a catch-all bucket: the bare id, or `<id>@<project>` when the snapshot is of a named project. */
+export const bucketId = (id: string, projectName?: string): string => (projectName ? `${id}@${projectName}` : id);
+/** True for the two catch-all buckets, whatever project they belong to. */
+export const isBucketId = (id: string): boolean => [UNLINKED_ID, UNDATED_ID].some((b) => id === b || id.startsWith(`${b}@`));
+
 export function buildModel(snap: Snapshot): Model {
   const settings = snap.settings ?? DEFAULT_SETTINGS;
+  const unlinkedId = bucketId(UNLINKED_ID, snap.projectName);
   const runs = buildRuns(snap);
-  const orders = groupOrders(snap.tasks);
+  const orders = ordersOf(snap.tasks, snap.projectName);
   const sessionOfTask = new Map<string, string>();
   for (const o of orders) for (const id of o.taskIds) sessionOfTask.set(id, o.id);
-  const sessionOfLane = (lane: string) => sessionOfTask.get(lane) ?? UNLINKED_ID;
+  const sessionOfLane = (lane: string) => sessionOfTask.get(lane) ?? unlinkedId;
   const { needs, stuckHistory } = buildNeeds(snap, runs, sessionOfLane);
 
   // An open need on a PR with no factory run (a human's review, say) still gets a lane, so it is never dropped.
@@ -782,7 +798,7 @@ export function buildModel(snap: Snapshot): Model {
   }));
   if (unlinkedLanes.length) {
     groups.push({
-      order: { id: UNLINKED_ID, title: "Unlinked PRs", taskIds: [] },
+      order: { id: unlinkedId, title: "Unlinked PRs", taskIds: [] },
       lanes: unlinkedLanes,
       isTaskOrder: false,
     });
@@ -820,7 +836,7 @@ export function buildModel(snap: Snapshot): Model {
       laneMeta[lane] = task
         ? { title: task.id, subtitle: deps.length ? `needs ${depText}` : "no dependencies" }
         : { title: lane, subtitle: pr?.branch ?? "no task matches this branch" };
-      if (pr) laneMeta[lane].pr = { number: pr.number, url: pr.url };
+      if (pr) laneMeta[lane].pr = { number: pr.number, url: pr.url, repo: pr.repo };
       if (task) {
         laneMeta[lane].task = {
           id: task.id,
@@ -946,7 +962,7 @@ export function buildModel(snap: Snapshot): Model {
       total_cost: null,
       archived: 0,
       // An order's tasks share a project; if they ever differ, the first task's wins.
-      project: isTaskOrder ? (tasks[0]?.project ?? null) : null,
+      project: snap.projectName ?? (isTaskOrder ? (tasks[0]?.project ?? null) : null),
     };
     events.sort((a, b) => Date.parse(a.started_at ?? "") - Date.parse(b.started_at ?? "") || a.event_id.localeCompare(b.event_id));
     for (const [i, e] of events.entries()) e.rowid = i + 1;

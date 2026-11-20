@@ -80,23 +80,21 @@ async function sendJson(url: string, body: unknown): Promise<void> {
 }
 
 /** The /customize_order agent for this PR: its status and the questions it is waiting on. */
-export function getCustomize(pr: number): Promise<CustomizeState> {
-  return getJson(`/api/customize/${pr}`) as Promise<CustomizeState>
+export function getCustomize(pr: number, project?: string | null): Promise<CustomizeState> {
+  return getJson(`/api/customize/${pr}${inProject(project)}`) as Promise<CustomizeState>
 }
 
+/** PR numbers repeat across repositories: `?project=owner/repo` says which one is meant. */
+const inProject = (project?: string | null): string => (project ? `?project=${encodeURIComponent(project)}` : '')
+
 /** Answers the pending question card. */
-export function answerCustomize(pr: number, body: AnswerBody): Promise<void> {
-  return sendJson(`/api/customize/${pr}/answer`, body)
+export function answerCustomize(pr: number, body: AnswerBody, project?: string | null): Promise<void> {
+  return sendJson(`/api/customize/${pr}/answer${inProject(project)}`, body)
 }
 
 /** Free-text reply, for when the agent asked in plain text. */
-export function replyCustomize(pr: number, body: ReplyBody): Promise<void> {
-  return sendJson(`/api/customize/${pr}/reply`, body)
-}
-
-/** Moves a session to a project (a plain name), or out of its project with null. */
-export async function setSessionProject(adwId: string, project: string | null): Promise<void> {
-  await sendJson(`/api/sessions/${encodeURIComponent(adwId)}/project`, { project })
+export function replyCustomize(pr: number, body: ReplyBody, project?: string | null): Promise<void> {
+  return sendJson(`/api/customize/${pr}/reply${inProject(project)}`, body)
 }
 
 export async function fetchEvents(adwId: string, after: number, limit = 500): Promise<EventsPage> {
@@ -146,10 +144,22 @@ import type { TaskMode } from '../../../factory/tasks.schema'
 export type { DeletePreview, DeleteReport, LoopState, ModeInfo, Settings, TaskMode }
 
 /** GET /api/factory: the factory-wide switches and what the loop is doing right now. */
+/** One project: a repository the factory manages. */
+export interface ProjectInfo {
+  /** "owner/repo". */
+  name: string
+  path: string
+  paused: boolean
+  dependsOn: string[]
+  /** The projects it depends on that still have unfinished tasks. */
+  waitingOn: string[]
+  tasks: number
+}
+
 export interface FactoryState {
   settings: Settings
   loop: LoopState
-  projects: string[]
+  projects: ProjectInfo[]
   maxAgentCap: number
 }
 
@@ -211,4 +221,22 @@ export function addDependency(id: string, dependency: string, reason: string): P
 
 export function removeDependency(id: string, dependency: string): Promise<unknown> {
   return call('POST', `/api/tasks/${enc(id)}/dependencies`, { remove: dependency })
+}
+
+/** Makes the repository checked out at `path` a project. */
+export function addProject(path: string): Promise<unknown> {
+  return call('POST', '/api/projects', { path })
+}
+
+/** Removes a project from the factory, deleting every one of its tasks. */
+export function deleteProject(name: string): Promise<unknown> {
+  return call('DELETE', `/api/projects/${enc(name)}`)
+}
+
+export function setProjectDependsOn(name: string, dependsOn: string[]): Promise<unknown> {
+  return call('POST', `/api/projects/${enc(name)}/depends-on`, { dependsOn })
+}
+
+export function setProjectPaused(name: string, paused: boolean): Promise<unknown> {
+  return call('POST', `/api/projects/${enc(name)}/paused`, { paused })
 }

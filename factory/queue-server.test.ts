@@ -3,6 +3,7 @@ import type { AuditEntry, AuditStore } from "./audit-log";
 import type { AttemptsStore } from "./pr-attempts";
 import type { PrSource, PullRequest } from "./prs";
 import { startQueueServer } from "./queue-server";
+import { DEFAULT_SETTINGS } from "./settings.ts";
 import type { Task } from "./tasks.schema";
 import type { TaskStore } from "./tasks.store";
 
@@ -134,6 +135,7 @@ function start(opts: { prs: PrSource; attempts?: AttemptsStore; now?: () => Date
     attempts: opts.attempts ?? fakeAttempts().store,
     audit: opts.audit ?? fakeAudit([]).store,
     now: opts.now,
+    settings: () => DEFAULT_SETTINGS,
   });
   servers.push(server);
   return { server, url: `http://127.0.0.1:${server.port}` };

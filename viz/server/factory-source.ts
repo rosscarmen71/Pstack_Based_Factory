@@ -5,15 +5,15 @@
  * index.ts calls after it changes a task's project.
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { auditStore } from "../../factory/audit-log.ts";
+import type { AuditEntry } from "../../factory/audit-log.ts";
 import type { TaskTarget } from "../../factory/delete-task.ts";
+import { factoryHome } from "../../factory/home.ts";
 import { MAX_PR_ATTEMPTS } from "../../factory/pr-attempts.ts";
 import { CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING, pendingRequest } from "../../factory/pr-state.ts";
+import { type Project, type ProjectContext, projectContext, projectRegistry } from "../../factory/projects.ts";
 import { DEFAULT_SETTINGS, type Settings, settingsStore } from "../../factory/settings.ts";
-import { fileStore } from "../../factory/tasks.store.ts";
-import { claudeProjectDir, WORKTREES_DIR } from "../../factory/worktrees.ts";
+import { claudeProjectDir } from "../../factory/worktrees.ts";
 import type { Task } from "../../factory/tasks.schema.ts";
 import {
   buildModel,
@@ -27,11 +27,8 @@ import {
 import { CustomizeManager } from "./customize-agent.ts";
 import { parseFeed, parseTranscript, runCommand, type FeedItem } from "./transcripts.ts";
 
+/** The factory's own repository: where the visualizer's code lives. */
 export const REPO_ROOT = resolve(import.meta.dir, "..", "..");
-/** Claude Code keeps a project's transcripts under its path with every non-alphanumeric character turned into "-". */
-export const TRANSCRIPTS_DIR =
-  process.env.FACTORY_TRANSCRIPTS_DIR ?? join(homedir(), ".claude", "projects", REPO_ROOT.replace(/[^A-Za-z0-9]/g, "-"));
-const HISTORY_PATH = resolve(import.meta.dir, "..", ".needs-history.jsonl");
 const GH = process.env.GH_BIN ?? (existsSync("/opt/homebrew/bin/gh") ? "/opt/homebrew/bin/gh" : "gh");
 
 const PR_TTL_MS = 10_000;
@@ -49,6 +46,95 @@ interface Cached {
   transcript: Transcript | null;
 }
 const transcriptCache = new Map<string, Cached>();
+
+// ── Projects ────────────────────────────────────────────────────────────────
+
+/** Everything the visualizer keeps per project: where its data is, and its own caches and customize agents. */
+interface ProjectSource {
+  project: Project;
+  ctx: ProjectContext;
+  prCache: { at: number; prs: PrInfo[] } | null;
+  prError?: string;
+  labelCache: Map<number, { at: number; events: LabelEvent[] }>;
+  /** The /customize_order agent host for this project's PRs. */
+  customize: CustomizeManager;
+  /** The visualizer's own record of this project's stuck tasks. */
+  historyPath: string;
+}
+
+const sources = new Map<string, ProjectSource>();
+
+/** One source per registered project, kept across polls; a project that left the registry is dropped. */
+function syncSources(): ProjectSource[] {
+  const projects = projectRegistry().list();
+  const names = new Set(projects.map((p) => p.name));
+  for (const name of sources.keys()) if (!names.has(name)) sources.delete(name);
+  for (const project of projects) {
+    const existing = sources.get(project.name);
+    if (existing && existing.project.path === project.path) {
+      // Keep the registry's latest word on what it depends on and whether it is paused.
+      existing.project = project;
+      existing.ctx.project = project;
+      continue;
+    }
+    const ctx = projectContext(project);
+    const src: ProjectSource = {
+      project,
+      ctx,
+      prCache: null,
+      labelCache: new Map(),
+      customize: null as unknown as CustomizeManager,
+      historyPath: join(ctx.paths.dir, "needs-history.jsonl"),
+    };
+    src.customize = new CustomizeManager({
+      cwd: project.path,
+      statePath: join(ctx.paths.dir, "customize-agents.json"),
+      isAnswered: (pr, commentAt) => requestAnswered(src, pr, commentAt),
+    });
+    sources.set(project.name, src);
+  }
+  return projects.flatMap((p) => sources.get(p.name) ?? []);
+}
+
+/** The data of one project, or null when it is not registered. */
+export function contextOf(name: string): ProjectContext | null {
+  syncSources();
+  return sources.get(name)?.ctx ?? null;
+}
+
+/** Every registered project's data, in registry order. */
+export const allContexts = (): ProjectContext[] => syncSources().map((s) => s.ctx);
+
+/**
+ * The /customize_order host for a PR. PR numbers repeat across repositories, so `project` says which one; without
+ * it the project that already has an agent for that number wins, else the first project.
+ */
+export function customizeFor(pr: number, project?: string | null): CustomizeManager | null {
+  const all = syncSources();
+  if (project) return sources.get(project)?.customize ?? null;
+  return (all.find((s) => s.customize.get(pr).status !== "none") ?? all[0])?.customize ?? null;
+}
+
+/** Where a project's transcripts are: its main checkout's folder, plus one per live agent worktree. */
+function dirsOf(src: ProjectSource): { dir: string; cwd: string }[] {
+  if (process.env.FACTORY_TRANSCRIPTS_DIR) return [{ dir: process.env.FACTORY_TRANSCRIPTS_DIR, cwd: src.project.path }];
+  const dirs = [{ dir: claudeProjectDir(src.project.path), cwd: src.project.path }];
+  const worktrees = src.ctx.paths.worktrees;
+  if (!existsSync(worktrees)) return dirs;
+  for (const name of readdirSync(worktrees)) {
+    const cwd = join(worktrees, name);
+    const dir = claudeProjectDir(cwd);
+    if (existsSync(dir)) dirs.push({ dir, cwd });
+  }
+  return dirs;
+}
+
+/** The transcript folders of one project, for erasing a deleted task's runs. */
+export function transcriptDirsOf(name: string): string[] {
+  syncSources();
+  const src = sources.get(name);
+  return src ? dirsOf(src).map((d) => d.dir) : [];
+}
 
 /** Reads the start of a file to find cheaply which factory command it ran; null when it is not a factory run. */
 function headCommand(path: string): ReturnType<typeof runCommand> {
@@ -76,8 +162,8 @@ export function runBelongsTo(command: NonNullable<ReturnType<typeof runCommand>>
  * Erases the transcripts (and their side folders) of every factory run that belongs to the target.
  * Only files that start with a factory command are ever touched. Returns how many runs were erased.
  */
-export function removeRunTranscripts(target: TaskTarget, dir?: string): number {
-  if (dir === undefined) return transcriptDirs().reduce((n, d) => n + removeRunTranscripts(target, d.dir), 0);
+export function removeRunTranscripts(target: TaskTarget, dir: string | string[]): number {
+  if (Array.isArray(dir)) return dir.reduce((n, d) => n + removeRunTranscripts(target, d), 0);
   if (!existsSync(dir)) return 0;
   let removed = 0;
   for (const name of readdirSync(dir)) {
@@ -99,19 +185,12 @@ export function removeRunTranscripts(target: TaskTarget, dir?: string): number {
 }
 
 /**
- * Every folder that may hold this factory's transcripts: the main checkout's, plus one per live agent worktree
- * (an agent runs in its own worktree, and Claude Code files transcripts by working directory). A worktree's
- * transcripts are moved to the main folder when its run ends.
+ * Every folder that may hold the factory's transcripts, across all projects. An agent runs in its own worktree,
+ * and Claude Code files transcripts by working directory; a worktree's transcripts are moved to its project's
+ * main folder when its run ends.
  */
 export function transcriptDirs(): { dir: string; cwd: string }[] {
-  const dirs = [{ dir: TRANSCRIPTS_DIR, cwd: REPO_ROOT }];
-  if (process.env.FACTORY_TRANSCRIPTS_DIR || !existsSync(WORKTREES_DIR)) return dirs;
-  for (const name of readdirSync(WORKTREES_DIR)) {
-    const cwd = join(WORKTREES_DIR, name);
-    const dir = claudeProjectDir(cwd);
-    if (existsSync(dir)) dirs.push({ dir, cwd });
-  }
-  return dirs;
+  return syncSources().flatMap(dirsOf);
 }
 
 /** Where the run's transcript is and which checkout it ran in; null when there is no such transcript. */
@@ -127,8 +206,8 @@ function findTranscript(sessionId: string): { path: string; cwd: string } | null
 /** The checkout to resume the run's conversation from: its worktree while it is live, else the repo root. */
 export const runCwd = (sessionId: string): string => findTranscript(sessionId)?.cwd ?? REPO_ROOT;
 
-function readTranscripts(): Transcript[] {
-  return transcriptDirs().flatMap(({ dir }) => readTranscriptsIn(dir));
+function readTranscripts(src: ProjectSource): Transcript[] {
+  return dirsOf(src).flatMap(({ dir }) => readTranscriptsIn(dir));
 }
 
 function readTranscriptsIn(dir: string): Transcript[] {
@@ -183,8 +262,8 @@ export function readFeed(sessionId: string, after: number): { items: FeedItem[];
 
 // ── GitHub ──────────────────────────────────────────────────────────────────
 
-async function gh(args: string[]): Promise<string> {
-  const proc = Bun.spawn([GH, ...args], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+async function gh(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn([GH, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed (exit ${code}): ${err.trim() || "no output"}`);
   return out;
@@ -223,13 +302,11 @@ function ciOf(rollup: RawPr["statusCheckRollup"]): PrInfo["ci"] {
 
 const repoOf = (url: string) => /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(url)?.[1] ?? "";
 
-let prCache: { at: number; prs: PrInfo[] } | null = null;
-let prError: string | undefined;
-
-async function readPrs(now: number): Promise<PrInfo[]> {
-  if (prCache && now - prCache.at < PR_TTL_MS) return prCache.prs;
+async function readPrs(src: ProjectSource, now: number): Promise<PrInfo[]> {
+  if (src.prCache && now - src.prCache.at < PR_TTL_MS) return src.prCache.prs;
+  const cwd = src.project.path;
   try {
-    const raw = JSON.parse(await gh(["pr", "list", "--state", "all", "--limit", "100", "--json", PR_FIELDS])) as RawPr[];
+    const raw = JSON.parse(await gh(cwd, ["pr", "list", "--state", "all", "--limit", "100", "--json", PR_FIELDS])) as RawPr[];
     const prs = raw.map((r) => ({
       number: r.number,
       url: r.url,
@@ -252,42 +329,40 @@ async function readPrs(now: number): Promise<PrInfo[]> {
       prs
         .filter((p) => p.reviews.some((v) => /Verdict:\s*\**\s*CHANGES/i.test(v.body)))
         .map(async (p) => {
-          const raw = JSON.parse(await gh(["pr", "view", String(p.number), "--json", "commits"])) as {
+          const raw = JSON.parse(await gh(cwd, ["pr", "view", String(p.number), "--json", "commits"])) as {
             commits: { committedDate: string }[];
           };
           p.commitDates = raw.commits.map((c) => c.committedDate);
         }),
     );
-    prCache = { at: now, prs };
-    prError = undefined;
+    src.prCache = { at: now, prs };
+    src.prError = undefined;
     return prs;
   } catch (e) {
-    prError = (e as Error).message;
-    return prCache?.prs ?? [];
+    src.prError = (e as Error).message;
+    return src.prCache?.prs ?? [];
   }
 }
 
 // ── /customize_order agents ─────────────────────────────────────────────────
 
 /** Whether the request made at `commentAt` has its summary comment, read fresh from GitHub. */
-async function requestAnswered(pr: number, commentAt: string): Promise<boolean> {
-  const raw = JSON.parse(await gh(["pr", "view", String(pr), "--json", "comments"])) as {
+async function requestAnswered(src: ProjectSource, pr: number, commentAt: string): Promise<boolean> {
+  const raw = JSON.parse(await gh(src.project.path, ["pr", "view", String(pr), "--json", "comments"])) as {
     comments: { body: string; createdAt: string }[];
   };
   const answered = pendingRequest({ comments: raw.comments }, CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING)?.createdAt !== commentAt;
   if (answered) {
     // The summary is what resolves the dot: drop the cached PR list so the next poll sees it.
-    prCache = null;
+    src.prCache = null;
     last = null;
   }
   return answered;
 }
 
-/** The one /customize_order agent host for this server. */
-export const customize = new CustomizeManager({ cwd: REPO_ROOT, isAnswered: requestAnswered });
-
 /** Starts (or resumes) the agent for every open PR whose /customize_order comment is unanswered. */
-function ensureCustomizeAgents(prs: PrInfo[]): void {
+function ensureCustomizeAgents(src: ProjectSource, prs: PrInfo[]): void {
+  const { customize } = src;
   for (const pr of prs) {
     if (pr.state !== "OPEN") continue;
     const request = pendingRequest(pr, CUSTOMIZE_COMMAND, CUSTOMIZE_SUMMARY_HEADING);
@@ -295,10 +370,9 @@ function ensureCustomizeAgents(prs: PrInfo[]): void {
   }
 }
 
-const labelCache = new Map<number, { at: number; events: LabelEvent[] }>();
-
 /** needs-human history only exists for PRs the loop worked on enough times to be flagged, so only those are asked. */
-async function readLabelEvents(prs: PrInfo[], runsPerPr: Map<number, number>, now: number): Promise<Record<number, LabelEvent[]>> {
+async function readLabelEvents(src: ProjectSource, prs: PrInfo[], runsPerPr: Map<number, number>, now: number): Promise<Record<number, LabelEvent[]>> {
+  const { labelCache } = src;
   const out: Record<number, LabelEvent[]> = {};
   const wanted = prs.filter((p) => p.labels.includes("needs-human") || (runsPerPr.get(p.number) ?? 0) >= MAX_PR_ATTEMPTS);
   await Promise.all(
@@ -309,7 +383,7 @@ async function readLabelEvents(prs: PrInfo[], runsPerPr: Map<number, number>, no
         return;
       }
       try {
-        const raw = JSON.parse(await gh(["api", `repos/${p.repo}/issues/${p.number}/events`, "--paginate"])) as {
+        const raw = JSON.parse(await gh(src.project.path, ["api", `repos/${p.repo}/issues/${p.number}/events`, "--paginate"])) as {
           event: string;
           created_at: string;
           label?: { name: string };
@@ -333,7 +407,7 @@ let loopCache: { at: number; running: boolean } | null = null;
 
 async function loopRunning(now: number): Promise<boolean> {
   if (loopCache && now - loopCache.at < LOOP_TTL_MS) return loopCache.running;
-  const proc = Bun.spawn(["pgrep", "-f", "factory/loop\\.ts"], { stdout: "ignore", stderr: "ignore" });
+  const proc = Bun.spawn(["pgrep", "-f", "factory/cli\\.ts start"], { stdout: "ignore", stderr: "ignore" });
   const running = (await proc.exited) === 0;
   loopCache = { at: now, running };
   return running;
@@ -341,10 +415,10 @@ async function loopRunning(now: number): Promise<boolean> {
 
 // ── Needs history (the visualizer's own file) ───────────────────────────────
 
-function readHistory(): StuckHistoryEntry[] {
-  if (!existsSync(HISTORY_PATH)) return [];
+function readHistory(path: string): StuckHistoryEntry[] {
+  if (!existsSync(path)) return [];
   const out: StuckHistoryEntry[] = [];
-  for (const line of readFileSync(HISTORY_PATH, "utf8").split("\n")) {
+  for (const line of readFileSync(path, "utf8").split("\n")) {
     if (!line.trim()) continue;
     try {
       out.push(JSON.parse(line) as StuckHistoryEntry);
@@ -355,10 +429,10 @@ function readHistory(): StuckHistoryEntry[] {
   return out;
 }
 
-function writeHistory(entries: StuckHistoryEntry[]): void {
+function writeHistory(path: string, entries: StuckHistoryEntry[]): void {
   const text = entries.map((e) => JSON.stringify(e)).join("\n");
-  const current = existsSync(HISTORY_PATH) ? readFileSync(HISTORY_PATH, "utf8").trim() : "";
-  if (text !== current) writeFileSync(HISTORY_PATH, text ? `${text}\n` : "");
+  const current = existsSync(path) ? readFileSync(path, "utf8").trim() : "";
+  if (text !== current) writeFileSync(path, text ? `${text}\n` : "");
 }
 
 // ── Snapshot ────────────────────────────────────────────────────────────────
@@ -394,19 +468,69 @@ export function load(): Promise<Loaded> {
   return inflight;
 }
 
-async function build(now: number, gen: number): Promise<Loaded> {
-  const errors: SourceErrors = {};
+/** One project's model, built from its own queue, audit log, PRs and transcripts. */
+async function buildProject(src: ProjectSource, now: number, settings: Settings, running: boolean, errors: SourceErrors): Promise<Model> {
+  const name = src.project.name;
   let tasks: Task[] = [];
   try {
-    tasks = fileStore().load();
+    tasks = src.ctx.store.load();
   } catch (e) {
-    errors.tasks = (e as Error).message;
+    errors[`${name}: tasks`] = (e as Error).message;
   }
-  let audit: ReturnType<ReturnType<typeof auditStore>["list"]> = [];
+  let audit: AuditEntry[] = [];
   try {
-    audit = auditStore().list();
+    audit = src.ctx.audit.list();
   } catch (e) {
-    errors.audit = (e as Error).message;
+    errors[`${name}: audit`] = (e as Error).message;
+  }
+  const prs = await readPrs(src, now);
+  if (src.prError) errors[`${name}: github`] = src.prError;
+  const runsPerPr = new Map<number, number>();
+  for (const a of audit) if (typeof a.target === "number") runsPerPr.set(a.target, (runsPerPr.get(a.target) ?? 0) + 1);
+  ensureCustomizeAgents(src, prs);
+  const snap: Snapshot = {
+    tasks,
+    audit,
+    prs,
+    transcripts: readTranscripts(src),
+    labelEvents: await readLabelEvents(src, prs, runsPerPr, now),
+    stuckHistory: readHistory(src.historyPath),
+    loopRunning: running,
+    customize: src.customize.all(),
+    now,
+    settings,
+    projectName: name,
+  };
+  const model = buildModel(snap);
+  try {
+    writeHistory(src.historyPath, model.stuckHistory);
+  } catch {
+    // History is a convenience; failing to save it never breaks the view.
+  }
+  return model;
+}
+
+/** All projects' models as one: their sessions side by side, each naming its project. */
+function mergeModels(models: Model[]): Model {
+  const merged: Model = { sessions: [], details: new Map(), events: new Map(), gates: new Map(), envelopes: new Map(), liveSessions: new Set(), stuckHistory: [] };
+  for (const m of models) {
+    merged.sessions.push(...m.sessions);
+    for (const [k, v] of m.details) merged.details.set(k, v);
+    for (const [k, v] of m.events) merged.events.set(k, v);
+    for (const [k, v] of m.gates) merged.gates.set(k, v);
+    for (const [k, v] of m.envelopes) merged.envelopes.set(k, v);
+    for (const id of m.liveSessions) merged.liveSessions.add(id);
+  }
+  return merged;
+}
+
+async function build(now: number, gen: number): Promise<Loaded> {
+  const errors: SourceErrors = {};
+  let srcs: ProjectSource[] = [];
+  try {
+    srcs = syncSources();
+  } catch (e) {
+    errors.projects = (e as Error).message;
   }
   let settings: Settings = DEFAULT_SETTINGS;
   try {
@@ -414,30 +538,9 @@ async function build(now: number, gen: number): Promise<Loaded> {
   } catch (e) {
     errors.settings = (e as Error).message;
   }
-  const [prs, running] = await Promise.all([readPrs(now), loopRunning(now)]);
-  if (prError) errors.github = prError;
-  const runsPerPr = new Map<number, number>();
-  for (const a of audit) if (typeof a.target === "number") runsPerPr.set(a.target, (runsPerPr.get(a.target) ?? 0) + 1);
-  ensureCustomizeAgents(prs);
-  const snap: Snapshot = {
-    tasks,
-    audit,
-    prs,
-    transcripts: readTranscripts(),
-    labelEvents: await readLabelEvents(prs, runsPerPr, now),
-    stuckHistory: readHistory(),
-    loopRunning: running,
-    customize: customize.all(),
-    now,
-    settings,
-  };
-  const model = buildModel(snap);
-  try {
-    writeHistory(model.stuckHistory);
-  } catch {
-    // History is a convenience; failing to save it never breaks the view.
-  }
-  const loaded = { model, errors, loopRunning: running, transcriptsDir: TRANSCRIPTS_DIR };
+  const running = await loopRunning(now);
+  const model = mergeModels(await Promise.all(srcs.map((src) => buildProject(src, now, settings, running, errors))));
+  const loaded = { model, errors, loopRunning: running, transcriptsDir: factoryHome() };
   if (gen === generation) last = { at: now, loaded };
   return loaded;
 }

@@ -7,10 +7,13 @@ from app-vitals/how-to-factory. TypeScript on Bun, strict mode.
 
 - `factory/`: the loop (`loop.ts`), queue view (`queue-server.ts`), supporting modules, and their tests next to them
   (`*.test.ts`).
-- `factory/tasks.json`: the task queue. `take_order` appends to it; `customize_order` edits one task's text after the
-  engineer approves; the loop moves `status`. No other skill edits it.
-- `factory/audit-log.jsonl`, `factory/pr-attempts.json`, `factory/settings.json`, `factory/loop-state.json`: runtime
-  state, gitignored. `.worktrees/` holds one git worktree per running agent, also gitignored.
+- The factory's data lives outside every repository, in `~/.pstack-factory/` (`PSTACK_FACTORY_HOME` moves it): the
+  list of projects, the settings, and one folder per project (a project is a GitHub repository) with its `tasks.json`,
+  audit log, attempt counts, loop state and agent worktrees. `factory/home.ts` and `factory/projects.ts` own those
+  paths; nothing else should build one.
+- A project's `tasks.json` is its task queue. `take_order` appends to it; `customize_order` edits one task's text
+  after the engineer approves; the loop moves `status`; dependencies change only through `factory deps set`. Skills
+  find the file with `factory tasks-file`.
 - `factory/skills/`: all skills, found by Claude Code through the `.claude/skills` symlink. The loop runs `/cook {id}`,
   `/taste_test {pr}` and `/remake {pr}`; `/take_order` and `/customize_order {pr}` are run by a human.
 
@@ -20,8 +23,9 @@ from app-vitals/how-to-factory. TypeScript on Bun, strict mode.
 - `bun run lint`: Biome lint (no formatter)
 - `bun run typecheck`: `tsc --noEmit`
 - `bun test`: the factory's own tests
-- `bun run loop`: run the loop
-- `bun run queue`: read-only queue and history view on 127.0.0.1:4040
+- `bun run factory install`: install the `factory` command and the skills for this user
+- `bun run loop`: run the factory (one loop per project)
+- `bun run queue`: read-only queue and history view of this repository's project on 127.0.0.1:4040
 
 ## Conventions
 
